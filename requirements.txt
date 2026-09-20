@@ -1,0 +1,20 @@
+# 文档转 PPT 生成器 —— Python 依赖
+#
+#   pip install -r requirements.txt
+#
+# 本机 C:\gyb-software\Python\Python311 已全部装好，可直接用，无需再装。
+
+python-pptx>=0.6.23      # 生成/读写 pptx（核心）
+python-docx>=1.1.0       # 解析 .docx 源文档
+pypdfium2>=4.0.0         # 解析 .pdf 源文档
+Pillow>=10.0.0           # 图像处理（测试图、缩略图）
+
+# ── 可选 ──────────────────────────────────────────────────────
+# 渲染与几何 QA 依赖外部 CLI，不是 pip 包：
+#
+#   officecli     把 pptx 渲染成 PNG（AI 看图用）
+#                 安装：irm https://d.officecli.ai/install.ps1 | iex
+#                 本机已装在 %LOCALAPPDATA%\OfficeCLI\officecli.exe
+#
+# 模型调用（大纲 / 规划 / 看图）只用标准库 urllib，不需要 openai SDK。
+# 只需在 .env 里填 PPTGEN_LLM_* 与 PPTGEN_VISION_*。
