@@ -1,0 +1,132 @@
+# -*- coding: utf-8 -*-
+"""OpenAI 兼容的模型调用（文本 + 视觉 + JSON 模式），只用标准库。
+
+支持 OpenAI / 智谱 / DeepSeek / 通义 / 本地 vLLM / Azure OpenAI
+（Azure 的 URL 与鉴权头由 `config.LLMConfig` 处理）。
+"""
+from __future__ import annotations
+import base64
+import json
+import os
+import time
+import urllib.error
+import urllib.request
+
+from . import config
+
+
+class LLMError(RuntimeError):
+    pass
+
+
+def _post(payload: dict, cfg: config.LLMConfig, timeout: int, retry: int) -> dict:
+    data = json.dumps(payload).encode('utf-8')
+    last = None
+    for attempt in range(retry + 1):
+        req = urllib.request.Request(cfg.url, data=data, headers=cfg.headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode('utf-8', 'replace')[:400]
+            last = 'HTTP %s: %s' % (e.code, body)
+            # 4xx（除 429）重试没意义
+            if 400 <= e.code < 500 and e.code != 429:
+                break
+        except Exception as e:                       # 超时 / 连接失败
+            last = '%s: %s' % (type(e).__name__, e)
+        if attempt < retry:
+            time.sleep(1.5 * (attempt + 1))
+    raise LLMError('模型调用失败（%s）：%s' % (cfg.model, last))
+
+
+def _content_of(resp: dict) -> str:
+    try:
+        msg = resp['choices'][0]['message']
+    except (KeyError, IndexError, TypeError):
+        raise LLMError('返回结构不符合预期: %s' % json.dumps(resp)[:300])
+    content = (msg.get('content') or '').strip()
+    if content:
+        return content
+    # 推理模型（如 deepseek-flash / deepseek-reasoner）会把大量 token 花在
+    # reasoning_content 上。max_tokens 给小了，推理就会把额度耗尽、content 为空。
+    # 静默返回空字符串比报错更糟 —— 上游会拿到空大纲继续往下跑。
+    usage = resp.get('usage') or {}
+    rt = (usage.get('completion_tokens_details') or {}).get('reasoning_tokens')
+    if msg.get('reasoning_content') or rt:
+        raise LLMError(
+            '模型只产出了推理内容，正文为空：推理占用了 %s 个 token（max_tokens 给 '
+            '少了）。把 .env 里的 PPTGEN_MAX_TOKENS 调大（建议 ≥8000），'
+            '或换用非推理模型（如 deepseek-chat）。' % (rt if rt is not None else '多'))
+    raise LLMError('模型返回了空内容: %s' % json.dumps(resp)[:300])
+
+
+def default_max_tokens() -> int:
+    """推理模型会把大量 token 花在 reasoning 上，默认额度要留足。"""
+    return config.get_int('PPTGEN_MAX_TOKENS', 8000)
+
+
+def ask_text(prompt: str, cfg: config.LLMConfig | None = None,
+             system: str | None = None, *, json_mode: bool = False,
+             max_tokens: int | None = None, temperature: float = 0.3) -> str:
+    cfg = cfg or config.llm_config()
+    if cfg is None:
+        raise LLMError('未配置文本模型（PPTGEN_LLM_*）')
+    msgs = []
+    if system:
+        msgs.append({'role': 'system', 'content': system})
+    msgs.append({'role': 'user', 'content': prompt})
+    payload = {'model': cfg.model, 'messages': msgs, 'temperature': temperature,
+               'max_tokens': max_tokens or default_max_tokens()}
+    if json_mode:
+        payload['response_format'] = {'type': 'json_object'}
+    return _content_of(_post(payload, cfg, config.get_int('PPTGEN_TIMEOUT', 180),
+                             config.get_int('PPTGEN_RETRY', 2)))
+
+
+def ask_json(prompt: str, cfg: config.LLMConfig | None = None,
+             system: str | None = None, **kw) -> dict:
+    """要求模型输出 JSON，并做一次宽容解析（剥 ``` 围栏 / 截取最外层大括号）。"""
+    raw = ask_text(prompt, cfg, system, json_mode=True, **kw)
+    txt = raw.strip()
+    if txt.startswith('```'):
+        txt = txt.split('\n', 1)[1] if '\n' in txt else txt
+        txt = txt.rsplit('```', 1)[0]
+    try:
+        return json.loads(txt)
+    except json.JSONDecodeError:
+        pass
+    i, j = txt.find('{'), txt.rfind('}')
+    if i >= 0 and j > i:
+        try:
+            return json.loads(txt[i:j + 1])
+        except json.JSONDecodeError:
+            pass
+    i, j = txt.find('['), txt.rfind(']')
+    if i >= 0 and j > i:
+        try:
+            return {'items': json.loads(txt[i:j + 1])}
+        except json.JSONDecodeError:
+            pass
+    raise LLMError('模型未返回可解析的 JSON：%s' % raw[:400])
+
+
+def _b64(path: str) -> str:
+    with open(path, 'rb') as f:
+        return base64.b64encode(f.read()).decode('ascii')
+
+
+def ask_vision(prompt: str, image_paths: list[str],
+               cfg: config.LLMConfig | None = None, *,
+               max_tokens: int | None = None) -> str:
+    cfg = cfg or config.vision_config()
+    if cfg is None:
+        raise LLMError('未配置视觉模型（PPTGEN_VISION_*）')
+    content = [{'type': 'text', 'text': prompt}]
+    for p in image_paths:
+        content.append({'type': 'image_url',
+                        'image_url': {'url': 'data:image/png;base64,' + _b64(p)}})
+    payload = {'model': cfg.model, 'max_tokens': max_tokens or default_max_tokens(),
+               'messages': [{'role': 'user', 'content': content}]}
+    return _content_of(_post(payload, cfg, config.get_int('PPTGEN_TIMEOUT', 180),
+                             config.get_int('PPTGEN_RETRY', 2)))
