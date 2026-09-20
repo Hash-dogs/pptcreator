@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文档转 PPT</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <div class="brand"><span class="dot"></span>文档转 PPT <em>· 迈胜模板</em></div>
+    <div id="cfg" class="cfg">读取配置…</div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ── 步骤 1 ─────────────────────────────────────────── -->
+  <section class="card" id="step1">
+    <div class="stephead"><span class="num">1</span><h2>选择源文档</h2></div>
+    <p class="hint">
+      支持 <code>.pptx</code> <code>.docx</code> <code>.pdf</code> <code>.txt</code> <code>.md</code>。
+      文件放在项目根目录 <code>C:\gyb-software\programs\program-pptcreator02\</code> 下。
+    </p>
+    <div class="row">
+      <select id="src"></select>
+      <button id="btnOutline" class="primary">生成大纲</button>
+    </div>
+    <div id="srcInfo" class="srcinfo"></div>
+  </section>
+
+  <!-- ── 步骤 2 ─────────────────────────────────────────── -->
+  <section class="card muted" id="step2">
+    <div class="stephead">
+      <span class="num">2</span><h2>审阅并修改大纲</h2>
+      <span id="outlineMeta" class="meta"></span>
+    </div>
+    <p class="hint">
+      这是**人工确认的落点**——章节名和页标题都可以直接改。确认后才会进入生成。
+    </p>
+    <div id="outlineEditor" class="outline"></div>
+    <details class="adv">
+      <summary>高级：直接编辑 JSON</summary>
+      <textarea id="outlineJson" spellcheck="false"></textarea>
+    </details>
+    <div class="row end">
+      <label class="inline">修复轮数
+        <input id="rounds" type="number" value="3" min="0" max="6" style="width:64px">
+      </label>
+      <label class="inline">输出文件名
+        <input id="deckName" type="text" value="mydeck" style="width:150px">
+      </label>
+      <button id="btnGenerate" class="primary">生成 PPT</button>
+    </div>
+  </section>
+
+  <!-- ── 步骤 3 ─────────────────────────────────────────── -->
+  <section class="card muted" id="step3">
+    <div class="stephead">
+      <span class="num">3</span><h2>生成进度</h2>
+      <span id="jobState" class="meta"></span>
+    </div>
+    <pre id="log" class="log"></pre>
+  </section>
+
+  <!-- ── 步骤 4 ─────────────────────────────────────────── -->
+  <section class="card muted" id="step4">
+    <div class="stephead">
+      <span class="num">4</span><h2>预览与下载</h2>
+      <span id="qaBadge" class="meta"></span>
+    </div>
+    <div id="resultBar" class="row"></div>
+    <div id="gallery" class="gallery"></div>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

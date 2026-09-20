@@ -1,0 +1,93 @@
+/* 文档转 PPT —— 前端样式。配色取自公司模板 theme1.xml 的 clrScheme。*/
+:root{
+  --red:#D31245; --blue:#00467F; --dark:#231F20; --muted:#646463;
+  --grey:#807F83; --line:#E3E3E5; --tint:#EEF3F8; --bg:#F6F7F9;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--dark);
+  font:14px/1.6 "Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+}
+.wrap{max-width:1040px; margin:0 auto; padding:0 20px}
+
+/* ── 顶栏 ── */
+.topbar{background:#fff; border-bottom:3px solid var(--red); position:sticky; top:0; z-index:10}
+.topbar .wrap{display:flex; align-items:center; justify-content:space-between; height:56px}
+.brand{font-size:16px; font-weight:700; letter-spacing:.3px}
+.brand em{font-style:normal; font-weight:400; color:var(--muted); font-size:13px}
+.brand .dot{display:inline-block; width:9px; height:9px; background:var(--red);
+  border-radius:2px; margin-right:9px; vertical-align:1px}
+.cfg{font-size:12.5px; color:var(--muted)}
+.cfg b{color:var(--blue)}
+.cfg .off{color:var(--grey)}
+
+/* ── 卡片 ── */
+.card{background:#fff; border:1px solid var(--line); border-radius:10px;
+  padding:22px 24px; margin:20px 0}
+.card.muted{opacity:.45; pointer-events:none; transition:opacity .25s}
+.card.active{opacity:1; pointer-events:auto}
+.stephead{display:flex; align-items:center; gap:10px; margin-bottom:6px}
+.stephead h2{font-size:17px; margin:0; font-weight:700}
+.num{display:inline-flex; align-items:center; justify-content:center;
+  width:24px; height:24px; border-radius:50%; background:var(--blue); color:#fff;
+  font-size:13px; font-weight:700}
+.meta{margin-left:auto; font-size:12.5px; color:var(--muted)}
+.hint{color:var(--muted); font-size:13px; margin:4px 0 16px}
+.hint code{background:var(--tint); padding:1px 5px; border-radius:3px;
+  font-family:Consolas,monospace; font-size:12px; color:var(--blue)}
+
+/* ── 控件 ── */
+.row{display:flex; gap:12px; align-items:center; flex-wrap:wrap}
+.row.end{justify-content:flex-end; margin-top:18px}
+button{font:inherit; padding:9px 20px; border-radius:6px; border:1px solid var(--line);
+  background:#fff; color:var(--dark); cursor:pointer; transition:.15s}
+button:hover{border-color:var(--grey)}
+button.primary{background:var(--red); border-color:var(--red); color:#fff; font-weight:700}
+button.primary:hover{background:#B80F3B}
+button:disabled{opacity:.45; cursor:not-allowed}
+select,input[type=text],input[type=number]{
+  font:inherit; padding:8px 11px; border:1px solid var(--line); border-radius:6px;
+  background:#fff; color:var(--dark)}
+select{min-width:320px}
+label.inline{font-size:13px; color:var(--muted); display:flex; align-items:center; gap:7px}
+
+.srcinfo{margin-top:12px; font-size:12.5px; color:var(--muted)}
+
+/* ── 大纲编辑器 ── */
+.outline{margin-top:6px}
+.sec{border-left:2px solid var(--blue); padding:2px 0 2px 16px; margin:0 0 20px}
+.secname{font-weight:700; font-size:15px; margin-bottom:2px}
+.secsum{color:var(--muted); font-size:12.5px; margin-bottom:10px}
+.page{display:flex; gap:10px; align-items:baseline; margin:6px 0}
+.pageno{color:var(--red); font-weight:700; font-size:12.5px; min-width:20px}
+.page input{flex:1; border:1px solid transparent; background:transparent;
+  padding:5px 8px; border-radius:5px; font:inherit; color:var(--dark)}
+.page input:hover{border-color:var(--line)}
+.page input:focus{border-color:var(--blue); background:#fff; outline:none}
+.hinttag{color:var(--grey); font-size:12px; max-width:38%; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap}
+.adv{margin-top:14px}
+.adv summary{cursor:pointer; color:var(--muted); font-size:13px}
+textarea{width:100%; height:260px; margin-top:10px; padding:12px; font:12.5px/1.55
+  Consolas,monospace; border:1px solid var(--line); border-radius:6px; resize:vertical}
+
+/* ── 日志 ── */
+.log{background:#1D2026; color:#D6DBE1; padding:14px 16px; border-radius:8px;
+  font:12.5px/1.7 Consolas,monospace; max-height:280px; overflow:auto;
+  white-space:pre-wrap; margin:8px 0 0}
+.log .err{color:#FF7A93}
+
+/* ── 预览 ── */
+.gallery{display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
+  gap:16px; margin-top:16px}
+.gallery figure{margin:0; border:1px solid var(--line); border-radius:8px;
+  overflow:hidden; background:#fff}
+.gallery img{width:100%; display:block}
+.gallery figcaption{font-size:12px; color:var(--muted); padding:7px 10px;
+  border-top:1px solid var(--line)}
+.badge{display:inline-block; padding:3px 10px; border-radius:20px; font-size:12.5px;
+  font-weight:700}
+.badge.ok{background:#E6F4EA; color:#137333}
+.badge.warn{background:#FEF7E0; color:#8A5A00}
+a.dl{display:inline-block; padding:9px 20px; border-radius:6px; background:var(--blue);
+  color:#fff; text-decoration:none; font-weight:700; font-size:13.5px}
