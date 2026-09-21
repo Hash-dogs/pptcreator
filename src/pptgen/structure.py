@@ -298,10 +298,17 @@ def skeleton_digest(sk: dict, page_chars: int = 60) -> str:
 
     这是「1000 token 的摘要胜过 10000 token 的摘录」—— 结构永远完整，
     被截掉的只是每页的正文细节。
+
+    ⚠️ 章名与副题**分两行**写。早先拼成 `## 01 初识 Dify　—　什么是 Dify · 设计初衷
+    · 九大核心理念` 一行，模型就照抄整行当章节名 —— 而那个名字要印在分隔页的
+    40pt 大字上（一行只放得下约 14 字），必然被截成 `01 初识 Dify　—　什么是 Di…`。
+    分开写是釜底抽薪：**没有整行可以抄**。
     """
     L = []
     for c in sk.get('chapters', []):
-        L.append('## %s%s' % (c['name'], ('　—　' + c['subtitle']) if c.get('subtitle') else ''))
+        L.append('## %s' % c['name'])
+        if c.get('subtitle'):
+            L.append('   副标题（不是章节名的一部分）：%s' % c['subtitle'])
         for p in c['pages']:
             first = p.get('lead') or ''
             L.append('   - %s%s（%d 字）'

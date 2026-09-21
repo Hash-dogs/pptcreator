@@ -269,7 +269,8 @@ def run_generate(jid: str, outline: dict, parsed_path: str, name: str, rounds: i
         pptx = os.path.join(SAMPLES, '%s.pptx' % name)
 
         def build_qa(spec):
-            build_mod.build(spec, cfg_mod.template_path(), pptx, fill_toc=True)
+            build_mod.build(spec, cfg_mod.template_path(), pptx, fill_toc=True,
+                            on_log=lambda m: _log(jid, m))
             rep = geometry.analyse(pptx)
             s = rep['summary']
             _log(jid, '几何检查：%d error / %d warn' % (s['error'], s['warn']),
@@ -284,7 +285,8 @@ def run_generate(jid: str, outline: dict, parsed_path: str, name: str, rounds: i
             pipeline.save_json(deck, os.path.join(PLANS, '%s.deck.repaired.json' % name))
 
             # 用最终 spec 重建一次，确保落盘的是修复后的版本
-            build_mod.build(deck, cfg_mod.template_path(), pptx, fill_toc=True)
+            build_mod.build(deck, cfg_mod.template_path(), pptx, fill_toc=True,
+                            on_log=lambda m: _log(jid, m))
             rep = geometry.analyse(pptx)
             pipeline.save_json(rep, os.path.join(REPORTS, '%s.geometry.json' % name))
             with open(os.path.join(REPORTS, '%s.geometry.md' % name), 'w',

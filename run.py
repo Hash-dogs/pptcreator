@@ -66,7 +66,9 @@ def _stem(path: str) -> str:
 
 def _content(name: str):
     mod = importlib.import_module('pptgen.content_%s' % name)
-    return dict(slides=[dict(s) for s in mod.SLIDES], toc=list(mod.TOC))
+    # `TITLE` 是选填的：带上它封面才有标题（`build.fill_cover` 靠 spec['title']）。
+    return dict(slides=[dict(s) for s in mod.SLIDES], toc=list(mod.TOC),
+                title=getattr(mod, 'TITLE', ''))
 
 
 def _abs(p: str) -> str:
@@ -179,7 +181,8 @@ def cmd_build(args):
     stem = args.name or (_stem(args.spec) if args.spec else args.content)
     out = _abs(args.out or os.path.join(SAMPLES, '%s.pptx' % stem))
     with runlog.stage('build') as st:
-        build_mod.build(spec, args.template or cfg_mod.template_path(), out, fill_toc=True)
+        build_mod.build(spec, args.template or cfg_mod.template_path(), out,
+                        fill_toc=True, on_log=print)
         print('[build] %s（%d 页正文 + 公司封面/目录/封底）' % (out, len(spec['slides'])))
         print('[build] 结构自检通过')
         st.update(slides=len(spec['slides']))
@@ -252,7 +255,7 @@ def cmd_repair(args):
 
     def build_qa(spec):
         build_mod.build(spec, args.template or cfg_mod.template_path(),
-                        out_pptx, fill_toc=True)
+                        out_pptx, fill_toc=True, on_log=print)
         rep = geometry.analyse(out_pptx)
         if state['before'] is None:
             state['before'] = rep

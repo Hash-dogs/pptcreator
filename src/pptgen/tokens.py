@@ -50,12 +50,13 @@ WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 
 # ── 字体与字号 ────────────────────────────────────────────────
 EA, LAT = '微软雅黑', 'Segoe UI'
+# 模板自己的展示字体：封面标题（Helvetica Light 那一档）与目录页标题都用它。
+# 品牌页保持品牌的字重，正文页才用上面那对。
+EA_LIGHT = '微软雅黑 Light'
 FS = dict(kicker=12, title=26, h2=18, h3=17, body=16, small=13, source=12, min=12)
 
-# 公司骨架页在模板里的 layout 名
+# 公司骨架页在模板里的 layout 名（封面/目录页不靠 layout 名定位，靠占位符 idx）
 LAYOUT_BLANK = 'Blank'
-LAYOUT_TITLE_ONLY = 'Title Only'
-LAYOUT_AGENDA = 'Agenda'
 
 
 # ══════════════════════════════════════════════════════════════
@@ -206,6 +207,36 @@ def take_truncations() -> list[tuple[str, str]]:
     return got
 
 
+# ── 文字量宽（`_fit` 系列与 `wrap_lines` 共用同一个模型）─────────
+# 中文/全角 1.0em，西文 0.52em。**这是估算**，所以调用方要留余量。
+#
+# 这几个码点在 CJK 字体里就是全角，但都小于 U+2E80，早先一律按 0.52 算 ——
+# 而分隔页/封面的长标题里全是 `—` 和 `·`
+# （`01 初识 Dify　—　什么是 Dify · 设计初衷 · 九大核心理念`），
+# 于是宽度被低估 5–8%：两行折到贴边时，渲染出来就是溢出。
+_WIDE_PUNCT = frozenset('—–…‘’“”·')
+
+
+def _char_w(ch, pt):
+    return pt * (1.0 if ch in _WIDE_PUNCT or ord(ch) > 0x2E80 else 0.52)
+
+
+def text_w_in(text, pt):
+    """估算一段文字占用的宽度（英寸）。"""
+    return sum(_char_w(c, pt) for c in str(text)) / 72.0
+
+
+def _cut(text, max_in, pt, lines=1):
+    """裁到 `lines` 行内放得下，返回 (结果, 是否截断)。不记录。"""
+    limit = max_in * 72.0 * max(lines, 1)
+    w = 0.0
+    for i, ch in enumerate(text):
+        w += _char_w(ch, pt)
+        if w > limit:
+            return text[:max(i - 1, 1)].rstrip() + '…', True
+    return text, False
+
+
 def fit_one_line(text: str, max_in: float, size_pt: float, lines: int = 1) -> str:
     """把文本裁到 `lines` 行内放得下（超出加省略号）。
 
@@ -213,15 +244,142 @@ def fit_one_line(text: str, max_in: float, size_pt: float, lines: int = 1) -> st
     模型一旦写长就会折行溢出。几何检查只能报「装不下」，修复回环又可能因为
     「不得改动数字」而改不动 —— 这类**确定性**超标由程序截断最可靠。
     """
-    limit = max_in * 72.0 * max(lines, 1)
-    w = 0.0
-    for i, ch in enumerate(text):
-        w += size_pt * (1.0 if ord(ch) > 0x2E80 else 0.52)
-        if w > limit:
-            out = text[:max(i - 1, 1)].rstrip() + '…'
-            TRUNCATIONS.append((text, out))
-            return out
-    return text
+    out, cut = _cut(str(text), max_in, size_pt, lines)
+    if cut:
+        TRUNCATIONS.append((str(text), out))
+    return out
+
+
+# ── 折行（标题这类**可以占两行**的框用它，而不是截断）───────────
+
+# 宽度估算留的余量。折行是**硬换行**（写死段落），估偏了 PowerPoint 会再折一次，
+# 于是「两行」变成三行、压到下面的内容 —— 宁可少放几个字。
+_WIDTH_SAFETY = 0.95
+
+# 可以断在**其后**的字符：空格、破折号、间隔号、各类标点。
+_BREAK_AFTER = ' 　—–-·、，。；：！？,.;:!?)]}）】》」』%'
+# 不能出现在**行首**的字符（中文避头规则）。找不到优先断点时按字断，
+# 断点撞上这些字符就往回让 —— 否则行首会挂一个逗号。
+_NO_LINE_START = '、，。；：！？）】》」』·—…,.;:!?)]}%'
+
+
+def _last_break(cur: str) -> int:
+    """`cur` 里最后一个优先断点（返回断点后的下标）；没有返回 -1。
+
+    断点后面那个字不能是避头标点 —— `Dify · 设计初衷` 在空格后断，下一行就会
+    以 `·` 开头；宁可退到前一个 `·` 之后断。
+    """
+    for j in range(len(cur) - 1, 0, -1):
+        if cur[j - 1] in _BREAK_AFTER and cur[j] not in _NO_LINE_START:
+            return j
+    return -1
+
+
+def _is_word_char(ch: str) -> bool:
+    """拉丁字母/数字（含词内常见符号）—— 折行不能把它们劈开。"""
+    return ord(ch) <= 0x2E80 and (ch.isalnum() or ch in '.-_+/#&@')
+
+
+def _fallback_break(cur: str) -> int:
+    """没有优先断点时按字断，但要躲开两个坑。
+
+    ② 拉丁单词不许劈开（`Dify` 不能断成 `Dif` + `y`）
+    ③ 行首不许挂避头标点（下一行不能以 `、` `，` `·` 开头）
+    """
+    n = len(cur)
+    cut = n
+    while cut > 1 and _is_word_char(cur[cut - 1]):
+        cut -= 1
+    if cut <= 1:
+        cut = n
+    while cut > 1 and cut < n and cur[cut] in _NO_LINE_START:
+        cut -= 1
+    return max(cut, 1)
+
+
+def _wrap_at(text: str, w_in: float, pt: float) -> list[str]:
+    """按给定行宽贪心折行。
+
+    断点优先级：标点/空格之后 → 拉丁单词之前 → 任意字之间（避开行首标点）。
+    """
+    limit = w_in * 72.0
+    lines, cur, cur_w, i = [], '', 0.0, 0
+    while i < len(text):
+        ch = text[i]
+        cw = _char_w(ch, pt)
+        if cur and cur_w + cw > limit:
+            cut = _last_break(cur)
+            if cut <= 0:
+                cut = _fallback_break(cur)
+            # 下一行的首字不能是避头标点 —— 标点宁可**吊在上一行末尾**
+            # （中文排版的标点悬挂），也不能甩到下一行行首。
+            while cut > 1:
+                nxt = cur[cut] if cut < len(cur) else ch
+                if nxt not in _NO_LINE_START:
+                    break
+                cut -= 1
+            lines.append(cur[:cut].rstrip())
+            cur = cur[cut:].lstrip(' ')    # 续行的行首空格不留（视觉缩进）
+            cur_w = sum(_char_w(c, pt) for c in cur)
+            continue                      # 同一个字符要重新试一次，别吞掉
+        cur += ch
+        cur_w += cw
+        i += 1
+    if cur.strip():
+        lines.append(cur.rstrip())
+    return lines or ['']
+
+
+def wrap_lines(text: str, avail_in: float, pt: float, max_lines: int | None = None
+               ) -> list[str]:
+    """把文字折成若干行。
+
+    `max_lines` 给了就**尽量把行拉匀**：先贪心折出最少行数，再二分找「还能装进
+    `max_lines` 行的最小行宽」重新折 —— 否则 30 字标题会断成 29 字 + 1 字。
+    返回的行数**不保证** ≤ `max_lines`（真装不下时由 `fit_block` 决定怎么办）。
+    """
+    text = str(text)
+    limit = avail_in * _WIDTH_SAFETY
+    lines = _wrap_at(text, limit, pt)
+    if max_lines and len(lines) > max_lines:
+        lo, hi = limit / float(max_lines), limit
+        for _ in range(12):
+            mid = (lo + hi) / 2.0
+            if len(_wrap_at(text, mid, pt)) <= max_lines:
+                hi = mid
+            else:
+                lo = mid
+        lines = _wrap_at(text, hi, pt)
+    return lines
+
+
+def fit_block(text: str, avail_in: float, avail_h: float, *, sizes,
+              max_lines: int = 2, ls: float = 1.2) -> tuple[list[str], float]:
+    """在字号阶梯里挑最大的一个，让文字装进 `avail_in × avail_h` 且不超过 max_lines 行。
+
+    返回 `(各行文字, 字号)`。**用折行换字号，而不是截断** —— 标题横排两行比
+    「一行大字 + 省略号」好看得多，也不丢信息。
+
+    阶梯全试完仍装不下（标题被改成极端长度）才截断：用最小字号折到 `max_lines` 行，
+    末行加省略号，并把 `(原文, 截断后)` 记进 `TRUNCATIONS`。
+    所以**阶梯的下限要低到实际到不了**，截断只该是理论上的一格保险。
+    """
+    text = str(text)
+    sizes = list(sizes)
+    for size in sizes:
+        lines = wrap_lines(text, avail_in, size, max_lines=max_lines)
+        if len(lines) <= max_lines and len(lines) * size * ls / 72.0 <= avail_h:
+            return lines, size
+    size = sizes[-1]
+    lines = wrap_lines(text, avail_in, size, max_lines=max_lines)
+    if len(lines) > max_lines:
+        # 阶梯全试完还是装不下：只留前 max_lines 行，末行加省略号表示「后面还有」。
+        # 末行本来就是放得下的，所以要**先**把省略号算进宽度再裁。
+        keep = lines[:max_lines]
+        tail, _ = _cut(keep[-1] + '…', avail_in, size)
+        TRUNCATIONS.append((text, ''.join(keep[:-1]) + tail))
+        lines = keep[:-1] + [tail]
+    return lines, size
 
 
 def footer(slide, page_no, source=None):

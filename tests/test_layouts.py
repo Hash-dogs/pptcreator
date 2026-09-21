@@ -22,7 +22,9 @@ sys.path.insert(0, os.path.join(ROOT, 'src'))
 
 from unittest import mock                                # noqa: E402
 
-from pptgen import build, layouts, layout_spec, pipeline  # noqa: E402
+import pptx                                              # noqa: E402
+
+from pptgen import build, layouts, layout_spec, pipeline, tokens  # noqa: E402
 from pptgen import config                                # noqa: E402
 from pptgen.qa import geometry                           # noqa: E402
 
@@ -589,6 +591,185 @@ class TestRenderAll(unittest.TestCase):
                         for r in p.runs:
                             self.assertNotIn('…', r.text,
                                              '出现截断：%r' % r.text)
+
+
+class TestWrapAndFit(unittest.TestCase):
+    """标题的折行原语：**该折行就折行，别截断**。
+
+    背景：模型把源文档的「章名　—　副题」整串当章节名（30+ 字），分隔页 40pt
+    的大字框放不下，早先被 `_fit()` 截成 `01 初识 Dify　—　什么是 Di…`。
+    而大纲是**可以被用户改长的**，所以渲染层必须自己会折行。
+    """
+
+    def test_long_divider_title_wraps_instead_of_truncating(self):
+        title = '01 初识 Dify　—　什么是 Dify · 设计初衷 · 九大核心理念'
+        tokens.take_truncations()
+        lines, size = tokens.fit_block(title, 7.73, 1.60, sizes=(40, 36, 32, 28, 24))
+        self.assertEqual([], tokens.take_truncations(), '折行不该产生截断')
+        self.assertLessEqual(len(lines), 2)
+        # 折行只在断点处吃掉空格，文字本身一个都不能少
+        self.assertEqual(title.replace(' ', ''), ''.join(lines).replace(' ', ''))
+        for ln in lines:
+            self.assertNotIn('…', ln)
+            self.assertLessEqual(tokens.text_w_in(ln, size), 7.73)
+
+    def test_short_title_stays_one_line(self):
+        _, size = tokens.fit_block('01 初识 Dify', 7.73, 1.60,
+                                   sizes=(40, 36, 32, 28, 24))
+        self.assertEqual(40, size)
+
+    def test_bigger_type_beats_fewer_lines(self):
+        """**字号优先**：能在两行内放下就用最大的字号，不为了一行把字压小。
+
+        14 个汉字在 40pt 下差 0.44" 放不进一行 —— 这时取「40pt 折两行」，
+        而不是「26pt 挤一行」（分隔页要靠大字号压住版面）。
+        """
+        lines, size = tokens.fit_block('一二三四五六七八九十十一十二十三十四',
+                                       7.73, 1.60, sizes=(40, 36, 32))
+        self.assertEqual(40, size)
+        self.assertEqual(2, len(lines))
+
+    def test_line_never_starts_with_punctuation(self):
+        """行首不挂避头标点（`、` `，` `·`）。标点宁可吊在上一行末尾。"""
+        text = '从三类落地场景到四类应用形态、五项辅助能力与三档版本定价'
+        for ln in tokens.wrap_lines(text, 7.73, 36):
+            self.assertNotIn(ln[0], tokens._NO_LINE_START, ln)
+
+    def test_latin_word_is_not_split(self):
+        for ln in tokens.wrap_lines('平台对比 GPT-4o 与 langgenius/dify 的能力', 4.2, 20):
+            self.assertNotIn('Dif\n', ln + '\n')
+            self.assertFalse(ln.endswith('langge'), ln)
+
+    def test_absurd_title_truncates_and_records(self):
+        """阶梯全试完（用户把标题改到极端长度）才截断，而且要**记下来**。"""
+        tokens.take_truncations()
+        lines, _ = tokens.fit_block('标' * 200, 7.73, 1.60,
+                                    sizes=(40, 36, 32, 28, 24))
+        self.assertEqual(2, len(lines))
+        self.assertTrue(lines[-1].endswith('…'))
+        cuts = tokens.take_truncations()
+        self.assertEqual(1, len(cuts))
+        self.assertEqual('标' * 200, cuts[0][0], '记录里要有完整原文')
+
+
+class TestCoverAndAgenda(unittest.TestCase):
+    """封面填标题 + 日期，目录页填真正的目录 —— 都**不覆盖模板自己的版式**。
+
+    `spec['title']` 从 pipeline 一路传到 build 却从来没人消费，成品第一页
+    只有一个 MEVION 机器图；`fill_agenda` 则把标题写成 28pt `DARK`，
+    压在同色的深灰通栏上几乎看不见。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        tpl = _template()
+        if tpl is None:
+            raise unittest.SkipTest('模板文件不存在，跳过渲染回归')
+        cls.tpl = tpl
+        cls.tmp = tempfile.mkdtemp(prefix='pptgen-cover-')
+        slides = [dict(FIXTURES[0][1]), dict(FIXTURES[1][1])]
+
+        def make(name, title, toc):
+            path = os.path.join(cls.tmp, name + '.pptx')
+            build.build(dict(slides=[dict(s) for s in slides], toc=toc,
+                             title=title), tpl, path)
+            return pptx.Presentation(path)
+
+        cls.prs = make('normal', 'Dify 介绍与实战：从初识到落地',
+                       ['01 初识 Dify —— 什么是 Dify、设计初衷与九大核心理念',
+                        '02 为什么选 Dify —— 挑战与价值'])
+        cls.long = make('long', '一个非常长的标题' * 3, ['01 很长的章节名' * 4])
+        cls.absurd = make('absurd', '一个非常长的标题' * 6, [])
+        cls.empty = make('empty', '', [])
+
+    def _ph(self, prs, page, idx):
+        for sh in prs.slides[page].shapes:
+            if sh.is_placeholder and sh.placeholder_format.idx == idx:
+                return sh
+        return None
+
+    def test_cover_gets_the_deck_title(self):
+        tf = self._ph(self.prs, 0, 0).text_frame
+        self.assertEqual('Dify 介绍与实战：从初识到落地',
+                         tf.text.replace('\n', ''))
+
+    def test_cover_subtitle_is_the_date(self):
+        got = self._ph(self.prs, 0, 1).text_frame.text.strip()
+        self.assertRegex(got, r'^\d{4} 年 \d{1,2} 月$')
+
+    def test_long_cover_title_wraps_without_ellipsis(self):
+        """24 字的标题在封面上折两行放得下 —— 完全不该出现省略号。"""
+        tf = self._ph(self.long, 0, 0).text_frame
+        self.assertEqual(2, len(tf.paragraphs))
+        self.assertNotIn('…', tf.text)
+        self.assertEqual('一个非常长的标题' * 3, tf.text.replace('\n', ''))
+        self.assertEqual(32, tf.paragraphs[0].runs[0].font.size.pt)
+
+    def test_absurd_cover_title_truncates_but_says_so(self):
+        """48 字（远超封面能放下的量）才截断，而且**记录在案**，不是静默的。"""
+        tf = self._ph(self.absurd, 0, 0).text_frame
+        self.assertEqual(2, len(tf.paragraphs))
+        self.assertTrue(tf.text.endswith('…'))
+
+    def test_cover_keeps_the_template_typography(self):
+        """只设字号，颜色/对齐/字体全部继承 layout（模板封面是深色居中大字）。"""
+        for p in self._ph(self.prs, 0, 0).text_frame.paragraphs:
+            for r in p.runs:
+                self.assertIsNotNone(r.font.size)
+                self.assertIsNone(r.font.color.rgb if r.font.color
+                                  and r.font.color.type is not None else None)
+        # 副标题一个字号都不该设：24pt 加粗浅灰是 layout 给的
+        for p in self._ph(self.prs, 0, 1).text_frame.paragraphs:
+            for r in p.runs:
+                self.assertIsNone(r.font.size)
+
+    def test_agenda_gets_the_toc(self):
+        tf = self._ph(self.prs, 1, 0).text_frame
+        self.assertEqual('目录', tf.text)
+        body = self._ph(self.prs, 1, 12).text_frame
+        self.assertEqual(['01 初识 Dify —— 什么是 Dify、设计初衷与九大核心理念',
+                          '02 为什么选 Dify —— 挑战与价值'],
+                         [p.text for p in body.paragraphs])
+
+    def test_agenda_keeps_the_template_typography(self):
+        """目录标题（深灰通栏上的 40pt 白字）与条目（24pt + 品牌红圆点）
+        都来自 layout —— 一个显式字号都不该有，否则就会重演「深色压深色」。"""
+        for idx in (0, 12):
+            for p in self._ph(self.prs, 1, idx).text_frame.paragraphs:
+                for r in p.runs:
+                    self.assertIsNone(r.font.size, '不应覆盖模板字号')
+                    self.assertIsNone(r.font.color.rgb if r.font.color
+                                      and r.font.color.type is not None else None)
+
+    def test_template_sample_text_never_survives(self):
+        """目录为空也要清空占位符 —— 否则成品上留着「议题一/议题二/议题三」。"""
+        for idx in (0, 12):
+            got = self._ph(self.empty, 1, idx).text_frame.text
+            for junk in ('议题', '会议议程', 'Agenda Items'):
+                self.assertNotIn(junk, got)
+
+    def test_no_title_leaves_the_cover_alone(self):
+        """spec 里没有 title（`--content <老模块>` 那条路径）就别动封面。"""
+        self.assertEqual('', self._ph(self.empty, 0, 0).text_frame.text)
+
+
+class TestTruncationIsReported(unittest.TestCase):
+    """截断记录要真的被收走 —— 早先 `take_truncations()` 全仓库无人调用，
+    「记下来写进日志」是一句假注释，长驻进程里还会跨 job 累积。"""
+
+    def test_build_reports_truncations_through_on_log(self):
+        tpl = _template()
+        if tpl is None:
+            raise unittest.SkipTest('模板文件不存在')
+        tmp = tempfile.mkdtemp(prefix='pptgen-trunc-')
+        # 来源行走 `fit_one_line`（单行定高 0.30"），长到一定程度必然被截断。
+        spec = dict(FIXTURES[1][1])
+        spec['source'] = 'Source: 《' + '很长的来源说明' * 8 + '》'
+        seen = []
+        build.build(dict(slides=[spec], toc=[]), tpl,
+                    os.path.join(tmp, 'x.pptx'), on_log=seen.append)
+        self.assertTrue(any('截断' in m for m in seen), seen)
+        self.assertTrue(any('很长的来源说明' in m for m in seen), seen)
 
 
 if __name__ == '__main__':

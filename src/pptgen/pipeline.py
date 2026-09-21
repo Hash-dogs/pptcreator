@@ -13,6 +13,7 @@ import re
 
 from . import config, layout_spec, llm, structure
 from .layouts import LAYOUT_NAMES
+from .tokens import text_w_in, wrap_lines
 
 
 # ══════════════════════════════════════════════════════════════
@@ -325,13 +326,24 @@ _SYSTEM = '你是资深的中文商业演示顾问，擅长把长文档压缩成
 _HEAD_TAIL = """
 只输出 JSON，结构如下：
 {
-  "title": "整份 PPT 的标题",
+  "title": "整份 PPT 的标题（≤20 字，会印在封面上）",
   "sections": [
-    {"name": "01 章节名", "summary": "一句话概括",
-      "pages": [{"title": "页面标题", "hint": "展示形态", "intent": "表达意图",
+    {"name": "01 章节名（≤14 字，会印在章节分隔页的大字上）",
+      "summary": "一句话概括",
+      "pages": [{"title": "页面标题（≤24 字）", "hint": "展示形态", "intent": "表达意图",
                  "source": "来源标注", "anchor": "该页内容主要来自的源页标题"}]}
   ]
 }
+"""
+
+# 骨架里的 `## 01 初识 Dify　—　什么是 Dify · 设计初衷 · 九大核心理念` 是
+# 「章名　—　副题」拼起来的（见 `structure.skeleton_digest`），模型照抄整行当章名，
+# 于是分隔页那行 40pt 大字要 30 多字、被截成残句。这句话就是堵这个口子。
+_TITLE_RULE = """- **标题长度是版面事实**（超了会被压行或截断，很难看）：
+  整份 PPT 的标题 ≤20 字；章节名 ≤14 字；页面标题 ≤24 字。
+- 结构里 `—`（破折号）**之后是该章的副题，不是章节名的一部分** ——
+  章节名只取破折号之前那一段（如 `01 初识 Dify`），
+  副题的信息放进这一章的 summary，不要拼进 name。
 """
 
 # 每页的 `intent` 决定后面能挑哪些版式 —— 它是「这页在表达什么」，
@@ -396,8 +408,6 @@ def _outline_by_llm(doc, src, lo, hi, cfg, log=print) -> dict:
         log('[outline] 校验发现问题，带清单重试一次：%s' % '；'.join(problems))
         try:
             retry = gen(problems)
-            if not _outline_problems(retry, sk, lo, hi):
-                return retry
             data = retry
             problems = _outline_problems(retry, sk, lo, hi)
         except llm.LLMError as e:
@@ -406,7 +416,152 @@ def _outline_by_llm(doc, src, lo, hi, cfg, log=print) -> dict:
         # 重试仍不合格也不退回兜底（兜底更差）—— 确定性修能修的部分，其余记 warning。
         data['_warnings'] = _repair_outline(data, sk, lo, hi, problems)
         log('[outline] 已确定性修正：%s' % '；'.join(data['_warnings']))
+    # 超长标题交给模型缩写。位置有两处讲究：
+    #   晚于 `_repair_outline` —— 它会用骨架章名把 section name 盖回去；
+    #   早于 `_normalise_outline` —— toc 在那里按章节名 + summary 生成，
+    #   缩写之后跑就等于自动重建了目录行。
+    _shorten_titles(data, cfg, log)
     return _normalise_outline(data, doc, lo, hi)
+
+
+# ══════════════════════════════════════════════════════════════
+# 标题长度预算与缩写
+#
+# 标题长度是**版面事实**，不是文风偏好。三处标题各自的可容纳量（实测）：
+#   封面    6.18"×2.16"（54pt 起逐级降到 20pt，最多两行）→ 约 20 字
+#   分隔页  7.73"×1.60"（40pt 起降到 24pt，最多两行）    → 一行约 14 字
+#   正文页眉 11.33"×0.62"（26pt 单行）                   → 约 30 字，但两行会压到
+#                                                        正文，所以按 24 字控
+#
+# 超了不会静默截断（渲染层会折行），但**折行只是兜底**：源文档的章名常常是
+# 「章名　—　副题」一整串（`structure.skeleton_digest` 就是这么拼的），照抄上去
+# 两行大字全是字，分隔页很难看。压短是语义判断（要保信息、保口径），交给模型。
+# ══════════════════════════════════════════════════════════════
+_TITLE_BUDGET = dict(deck=20, section=14, page=24)
+
+_SHORTEN_SYSTEM = '你是中文商业演示的标题编辑，擅长把冗长的标题压成短而准确的一行。'
+
+
+def _long_titles(outline: dict) -> list[tuple[str, str, int]]:
+    """超预算的标题：[(定位键, 原文, 预算), ...]。
+
+    定位键形如 `title` / `section:2` / `page:2:0`（章节下标、页下标）。
+    章节分隔页的标题就是章节名，已经在 section 上算过一次，不重复收。
+    """
+    out: list[tuple[str, str, int]] = []
+    t = (outline.get('title') or '').strip()
+    if len(t) > _TITLE_BUDGET['deck']:
+        out.append(('title', t, _TITLE_BUDGET['deck']))
+    for i, s in enumerate(outline.get('sections') or []):
+        name = (s.get('name') or '').strip()
+        if len(name) > _TITLE_BUDGET['section']:
+            out.append(('section:%d' % i, name, _TITLE_BUDGET['section']))
+        for j, p in enumerate(s.get('pages') or []):
+            if p.get('divider'):
+                continue
+            title = (p.get('title') or '').strip()
+            if len(title) > _TITLE_BUDGET['page']:
+                out.append(('page:%d:%d' % (i, j), title, _TITLE_BUDGET['page']))
+    return out
+
+
+def _title_context(outline: dict, key: str) -> str:
+    """给缩写的模型一点上下文 —— 不知道这页讲什么，只能瞎压。"""
+    parts = key.split(':')
+    sections = outline.get('sections') or []
+    i = int(parts[1]) if len(parts) > 1 else -1
+    if not (0 <= i < len(sections)):
+        return ''
+    s = sections[i]
+    if parts[0] == 'section':
+        return s.get('summary') or ''
+    pages = s.get('pages') or []
+    j = int(parts[2]) if len(parts) > 2 else -1
+    if not (0 <= j < len(pages)):
+        return ''
+    return '　'.join(x for x in (s.get('name') or '',
+                                 pages[j].get('hint') or '') if x)
+
+
+def _num_prefix(text: str) -> str:
+    """开头的章节号（`01 初识 Dify` → `01`）。分隔页的编号靠它。"""
+    m = re.match(r'^\s*(\d{1,2})\s*[、.．]?\s*', text or '')
+    return m.group(1) if m else ''
+
+
+def _shorten_titles(outline: dict, cfg, log=print) -> None:
+    """把超预算的标题一次调用交给模型缩写。**原地改 `outline`**。
+
+    失败/超时/返回对不上，一律保留原文并记日志 —— 大纲阶段绝不能因为「缩写
+    没成功」就退回兜底（兜底更差）。真正的保证在渲染层：`fit_block` 会折行。
+    """
+    long = _long_titles(outline)
+    if not long:
+        return
+    items = []
+    for k, (key, orig, budget) in enumerate(long, 1):
+        ctx = _title_context(outline, key)
+        items.append('%d. 现标题（%d 字，上限 %d 字）：%s%s'
+                     % (k, len(orig), budget, orig,
+                        ('\n   所在章节：' + ctx) if ctx else ''))
+    prompt = f"""下面是一份中文汇报 PPT 里**过长**的标题。请逐个压短。
+
+{chr(10).join(items)}
+
+要求：
+- 压到各条给出的**上限字数以内**，越短越好，但**只许压长度**：
+  数字、百分比、专有名词、产品名与版本号必须原样保留。
+- 开头的章节号（`01`、`02` 这种）必须保留。
+- 写成名词短语，不要写成一个句子，不要加书名号/引号，不要以句号结尾。
+- 完整说法**已经留在这一章的 summary 里**，这里只要一个能放在大字标题上的短语。
+- 条数、顺序与上面完全一致。
+
+只输出 JSON：
+{{"titles": ["压短后的第 1 条", "压短后的第 2 条"]}}
+"""
+    try:
+        data = llm.ask_json(prompt, cfg, system=_SHORTEN_SYSTEM,
+                            max_tokens=config.outline_max_tokens())
+    except (llm.LLMError, ValueError) as e:
+        log('[outline] %d 个标题超长，但缩写调用失败，保留原文：%s' % (len(long), e))
+        return
+    got = data.get('titles') if isinstance(data, dict) else None
+    if not isinstance(got, list):
+        log('[outline] 标题缩写返回的结构不对，保留原文：%s' % str(data)[:120])
+        return
+    if len(got) != len(long):
+        log('[outline] 标题缩写返回 %d 条、要的是 %d 条，全部保留原文'
+            % (len(got), len(long)))
+        return
+
+    sections = outline.get('sections') or []
+    changed = 0
+    for (key, orig, budget), new in zip(long, got):
+        if isinstance(new, dict):               # 有的模型写成 {"text": "…"}
+            new = new.get('text') or new.get('title')
+        new = str(new or '').strip().strip('《》「」“”"\'')
+        num = _num_prefix(orig)
+        if num and not _num_prefix(new):
+            new = num + ' ' + new
+        # 只接受「确实更短」的结果：模型原样抄回来、或者压得更长，都当没做成。
+        if not new or len(new) >= len(orig):
+            continue
+        parts = key.split(':')
+        try:
+            if parts[0] == 'title':
+                outline['title'] = new
+            elif parts[0] == 'section':
+                sections[int(parts[1])]['name'] = new
+            else:
+                sections[int(parts[1])]['pages'][int(parts[2])]['title'] = new
+        except (IndexError, KeyError, ValueError):
+            continue
+        changed += 1
+        log('[outline] 标题缩写（%d→%d 字）：%s → %s'
+            % (len(orig), len(new), orig[:28], new))
+    if changed < len(long):
+        log('[outline] %d/%d 个超长标题已缩写，其余保留原文（渲染层会折行）'
+            % (changed, len(long)))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -529,8 +684,8 @@ def _outline_oneshot(doc, src, lo, hi, cfg, sk, feedback=None) -> dict:
 - **章节沿用上面的结构**：一章不少，章名用给定的。
 - 正文总页数控制在 {lo}–{hi} 页之间（不含封面/目录/封底）。
 - 每章至少 1 页；**页可以在章内合并，章节不可合并、不可丢弃**。
-- 每页给一个**具体的、有信息量的标题**（≤24 字），不要「概述」「简介」这类空标题。
-- 每页标注最适合的展示形态 hint（如「对比表」「流程图」「三个并列要点」「一个核心数字」）。
+- 每页给一个**具体的、有信息量的标题**，不要「概述」「简介」这类空标题。
+{_TITLE_RULE}- 每页标注最适合的展示形态 hint（如「对比表」「流程图」「三个并列要点」「一个核心数字」）。
 - 每页给 source（来源标注），并给 anchor：填它主要取材的那条源页标题（照抄上面的）。
 - {_mode_hint()}
 {_INTENT_BLOCK}{fix}{_HEAD_TAIL}"""
@@ -572,8 +727,8 @@ def _outline_chunked(doc, sk, lo, hi, cfg) -> dict:
 要求：
 - 为本章设计 **{k} 页**，顺序与原文一致。
 - 页可以在章内合并，但不要跨章取材。
-- 每页给一个具体的、有信息量的标题（≤24 字），不要「概述」「简介」这类空标题。
-- 每页标注展示形态 hint、来源 source，以及 anchor（照抄本章源页标题里最相关的一条）。
+- 每页给一个具体的、有信息量的标题，不要「概述」「简介」这类空标题。
+{_TITLE_RULE}- 每页标注展示形态 hint、来源 source，以及 anchor（照抄本章源页标题里最相关的一条）。
 - 数字、专有名词、结论句必须原样保留。
 {_INTENT_BLOCK}
 只输出 JSON：
@@ -595,25 +750,45 @@ def _outline_chunked(doc, sk, lo, hi, cfg) -> dict:
 _NOT_A_TITLE = re.compile(
     r'^(SECTION\s*\d*|CONTENTS?|目\s*录|目录|\d{1,2}|第\s*\d+\s*[章部节])$', re.I)
 
-# 目录页一行的长度上限。模板的目录占位符是 10.12"×4.45"（16pt 正文），
-# 一行大约放得下这么多字 —— 章节从 1 个变成 5 个之后，再让每行拖一句长
-# summary 就会溢出（几何检查会报 text_overflow）。
+# 目录页一行的长度上限。**这是版面事实，不是文风偏好**：模板的目录占位符
+# 10.12"×4.45"，扣掉左右内边距（0.1"+0.1"）与 master bodyStyle 的 0.35" 悬挂缩进
+# （品牌红圆点挂在那儿），实到 9.57"；条目字号由 layout 给，是 24pt。
+# 所以按**宽度**卡而不是按字数：中英混排的 30 字比纯中文的 30 字宽得多
+# （实测 `01 初识 Dify —— 融合 BaaS 与 LLMOps 的开源 LLM 应用开发平台`
+# 在 24pt 下要 10.36"，直接折行）。
 # summary 的完整版仍留在大纲 JSON 里给人看，目录页上只放放得下的部分。
-_TOC_MAX = 30
+_TOC_WIDTH_IN = 9.50
+_TOC_MAX = 30               # 字数兜底（纯中文一行放得下 28 字，留点余量）
 
 
 _TOC_SEP = ' —— '
 
 
+def _trim_w(text: str, room: float, pt: float = 24) -> str:
+    """按宽度裁到 `room` 英寸以内。
+
+    走 `wrap_lines` 取第一行，而不是逐字切：这样断点落在标点/空格后，
+    也不会把 `LLMOps` 劈成 `LLM`。**不加省略号** —— 目录行末尾挂个 `…` 比
+    断在半句更难解释（完整说法本来就在大纲 JSON 和 summary 里）。
+    """
+    if room <= 0:
+        return ''
+    text = str(text)
+    if text_w_in(text, pt) <= room:
+        return text
+    return wrap_lines(text, room, pt)[0].rstrip('，。、；：,;: ')
+
+
 def _toc_line(name: str, summary: str = '') -> str:
-    name = (name or '').strip()
+    name = _trim_w((name or '').strip(), _TOC_WIDTH_IN)[:_TOC_MAX]
     summary = (summary or '').strip()
-    room = _TOC_MAX - len(name) - len(_TOC_SEP)
-    if not summary or room < 4:
-        return name[:_TOC_MAX]              # 名字本身就快占满了，别带 summary
-    if len(summary) <= room:
-        return name + _TOC_SEP + summary
-    return name + _TOC_SEP + summary[:room].rstrip()
+    if not summary:
+        return name
+    room = _TOC_WIDTH_IN - text_w_in(name + _TOC_SEP, 24)
+    if room < 0.8:              # 名字本身就快占满一行了，别再拖一条 summary
+        return name
+    # 主要按宽度卡（版面事实），字数上限只是兜底（纯中文一行放得下 28 字）。
+    return (name + _TOC_SEP + _trim_w(summary, room))[:_TOC_MAX]
 
 
 def _outline_fallback(doc: dict, lo: int, hi: int) -> dict:
@@ -1163,8 +1338,17 @@ def _normalise_plan(slides: list[dict], outline: dict, log=None) -> dict:
                 and i - 1 < len(sections)):
             sl['kicker'] = sections[i - 1]
         clean.append(sl)
-    return dict(slides=clean, toc=list(outline.get('toc') or []),
-                title=outline.get('title', ''))
+    # 目录页的每一行都在这里过一遍 `_toc_line`：前端（`web/app.js`）在用户改动
+    # 章节名/页标题时是**本地重拼** toc 的，拼出来的行没有长度上限；而目录页
+    # 又在几何检查的 skip 名单里（`qa/geometry.py` 默认跳过第 1/2/最后一页），
+    # 溢出了没有任何东西会报。服务端这里是从大纲到成品的必经之路。
+    toc = [_toc_line(t) for t in (outline.get('toc') or [])]
+    if not toc:
+        # 目录空了就按章节兜底生成 —— 实测有一次跑出来 `toc: []`，
+        # 于是目录页整页没被填充，上面还留着模板的「议题一/议题二/议题三」。
+        toc = [_toc_line(s.get('name'), s.get('summary'))
+               for s in (outline.get('sections') or [])]
+    return dict(slides=clean, toc=toc, title=outline.get('title', ''))
 
 
 def _source_text(doc: dict) -> str:

@@ -43,7 +43,7 @@ from .tokens import (
     LEFT, RIGHT, W, FS, RED, DARK, MUTED, GREY, RULE, TINT, WHITE,
     EA, LAT, Y_CONTENT, Y_CONTENT_BOTTOM, Y_SOURCE,
     put, hrule, vrule, dot, outline_box, tint_band,
-    header, footer, fit_one_line,
+    header, footer, fit_one_line, fit_block, text_w_in,
 )
 
 # 新版式的正文下界。留到 6.60 而不是 6.95：来源行在 6.78，内容压过它会被
@@ -69,8 +69,8 @@ def layout(name: str, **meta):
 
 
 def _w_in(text, pt):
-    """估算一段文字占用的宽度（英寸）。"""
-    return sum(pt * (1.0 if ord(c) > 0x2E80 else 0.52) for c in str(text)) / 72.0
+    """估算一段文字占用的宽度（英寸）。量宽模型在 tokens（与折行/截断同一套）。"""
+    return text_w_in(text, pt)
 
 
 def _fit(text, avail_in, pt, lines=1):
@@ -185,13 +185,20 @@ def _flat(paras) -> str:
    必填 num（章节号，≤2 字符，如 "03"）、title（章节名，≤14 字）
    选填 lead（一句导语，≤40 字）、source
    ⚠️ 这是结构页：**不要放正文、不要放列表**。它的作用是让读者看见「换章了」。''',
-        capacity='num ≤2 字符；title ≤14 字；lead ≤40 字，超过就删。')
+        capacity='num ≤2 字符；title ≤14 字（40pt 一行放得下约 14 字，'
+                 '源章名带着副题时压成短语，完整说法交给本页的 lead）；'
+                 'lead ≤40 字，超过就删。')
 def render_section_divider(s, spec):
     """章节隔断：大号章节号在左，章节名与导语在右，中间一条竖发丝线。
 
     构图刻意撑满上半页：早先把元素全挤在左上角，几何检查的
     `large_empty_area` 每次都报「最大连续空白块约占 50%」—— 安静是隔断页的
     设计意图，但**空**不是：大号数字 + 竖线 + 章节名这一组要把版面立住。
+
+    标题**折行而不是截断**：源文档的章名常常是「章名　—　副题」一整串
+    （`structure.skeleton_digest` 就是这么拼的），40pt 一行只放得下约 14 字，
+    早先 30 字的章名被 `_fit()` 截成「01 初识 Dify　—　什么是 Di…」。
+    现在先降到能一行放下的字号，实在降不下来就折两行，都不行才截断。
     """
     header(s, spec.get('kicker'))
     num = _fit(spec.get('num', ''), 3.0, 120)
@@ -199,9 +206,13 @@ def render_section_divider(s, spec):
         [[(num, dict(size=120, color=RED, bold=True))]])
     vrule(s, LEFT + 3.30, 2.40, 2.10, RULE)
     if spec.get('title'):
+        # 盒子不动（一行时位置与早先完全一致）；两行时向下长到 4.08"，
+        # 仍在发丝线（4.85"）之上。
+        lines, size = fit_block(spec['title'], W - 3.60, 1.60,
+                                sizes=(40, 36, 32, 28, 24), max_lines=2)
         put(s, LEFT + 3.60, 2.75, W - 3.60, 1.60,
-            [[(_fit(spec['title'], W - 3.60, 40),
-               dict(size=40, color=DARK, bold=True))]], ls=1.20)
+            [[(ln, dict(size=size, color=DARK, bold=True))] for ln in lines],
+            ls=1.20)
     hrule(s, LEFT, 4.85, W)
     if spec.get('lead'):
         put(s, LEFT, 5.05, 9.60, 0.80,

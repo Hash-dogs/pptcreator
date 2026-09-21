@@ -354,6 +354,23 @@ function renderOutlineWarn(meta) {
   box.hidden = false;
 }
 
+/* 目录行的拼法，与后端 `pipeline._toc_line` 对齐。
+
+   目录页那 10.12" 的占位符在 24pt 下一行只放得下约 28 字，而目录页
+   **不在几何检查范围内**（后端默认跳过第 1/2/最后一页）—— 超了没有任何东西会报。
+   后端 `_normalise_plan` 还会按真实宽度再夹一次（前端随时可能贴一份手改 JSON
+   进来），这里只是让编辑时的预览不出现长得离谱的行。 */
+const TOC_MAX = 30;
+const TOC_SEP = ' —— ';
+function tocLine(name, summary) {
+  name = (name || '').slice(0, TOC_MAX);
+  summary = (summary || '').trim();
+  if (!summary) return name;
+  const room = TOC_MAX - name.length - TOC_SEP.length;
+  if (room < 4) return name;
+  return name + TOC_SEP + summary.slice(0, room);
+}
+
 function renderOutline(o) {
   const box = $('outlineEditor');
   if (!o) {
@@ -398,7 +415,7 @@ function renderOutline(o) {
       const si = +inp.dataset.si;
       if (inp.dataset.pi === undefined) o.sections[si].name = inp.value;
       else o.sections[si].pages[+inp.dataset.pi].title = inp.value;
-      o.toc = o.sections.map((x) => x.summary ? x.name + ' —— ' + x.summary : x.name);
+      o.toc = o.sections.map((x) => tocLine(x.name, x.summary));
       $('outlineJson').value = JSON.stringify(o, null, 2);
     };
   });

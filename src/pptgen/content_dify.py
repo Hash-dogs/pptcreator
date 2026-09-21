@@ -5,6 +5,10 @@
 页码由 build 自动分配，此处不写 `page`。
 """
 
+# 封面标题。`run.py build --content dify` 这条路以前没有 title，
+# 于是封面两个占位符一直是空的 —— 成品第一页只有一个 MEVION 机器图。
+TITLE = 'Dify 介绍与实战'
+
 TOC = [
     '01  初识 Dify —— 什么是 Dify、设计初衷与九大核心理念',
     '02  为什么选 Dify —— AI 应用开发的四大挑战与七项价值',

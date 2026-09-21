@@ -14,11 +14,12 @@ import io
 import os
 import sys
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 
-from pptgen import parse, pipeline, structure          # noqa: E402
+from pptgen import llm, parse, pipeline, structure     # noqa: E402
 
 
 # ══════════════════════════════════════════════════════════════
@@ -277,6 +278,102 @@ class TestOutlineAssembly(unittest.TestCase):
         without = self._plan_one('', '一个自创的主张式标题')
         self.assertEqual(without['layout'], 'statement')
         self.assertNotIn('这一节的正文说明文字', _slide_text(without))
+
+
+class TestShortenTitles(unittest.TestCase):
+    """超长标题交给模型缩写（用户明确要求「标题太长就用模型总结来缩短」）。
+
+    为什么必须缩写而不是只靠折行：源文档的章名是「章名　—　副题」一整串
+    （`structure.skeleton_digest` 就是这么拼的），30 多字印在分隔页的 40pt
+    大字上，折两行也全是字。缩写是语义判断，只能模型来做 —— 但它**不许影响
+    主流程**：拿不到结果就保留原文。
+    """
+
+    def _outline(self):
+        return dict(
+            title='一个非常长的整份 PPT 标题超过了二十个字的上限',
+            sections=[dict(
+                name='01 初识 Dify　—　什么是 Dify · 设计初衷 · 九大核心理念',
+                summary='Dify 是融合 BaaS 与 LLMOps 的开源 LLM 应用平台。',
+                pages=[dict(title='Dify 是什么：开源 LLM 应用开发平台与它的技术栈分层'),
+                       dict(title='短标题')])])
+
+    def test_long_titles_are_listed_with_budget(self):
+        long = pipeline._long_titles(self._outline())
+        self.assertEqual(['title', 'section:0', 'page:0:0'], [k for k, _, _ in long])
+        self.assertEqual([20, 14, 24], [b for _, _, b in long])
+        self.assertEqual([], pipeline._long_titles(
+            dict(title='短标题', sections=[dict(name='01 甲', pages=[dict(title='乙')])])))
+
+    def test_model_shrinks_titles_and_keeps_the_chapter_number(self):
+        ol = self._outline()
+        with mock.patch.object(llm, 'ask_json', return_value={
+                'titles': ['Dify 介绍与实战', '初识 Dify', 'Dify 是什么']}):
+            pipeline._shorten_titles(ol, object(), log=lambda m: None)
+        self.assertEqual('Dify 介绍与实战', ol['title'])
+        self.assertEqual('01 初识 Dify', ol['sections'][0]['name'],
+                         '章节号不能被缩写吃掉 —— 分隔页的大号编号靠它')
+        self.assertEqual(['Dify 是什么', '短标题'],
+                         [p['title'] for p in ol['sections'][0]['pages']])
+
+    def test_model_output_written_as_dicts_is_accepted(self):
+        ol = self._outline()
+        with mock.patch.object(llm, 'ask_json', return_value={
+                'titles': [{'text': 'Dify 介绍与实战'}, {'text': '01 初识 Dify'},
+                           {'text': 'Dify 是什么'}]}):
+            pipeline._shorten_titles(ol, object(), log=lambda m: None)
+        self.assertEqual('01 初识 Dify', ol['sections'][0]['name'])
+
+    def test_wrong_count_keeps_everything(self):
+        ol = self._outline()
+        before = ol['sections'][0]['name']
+        with mock.patch.object(llm, 'ask_json', return_value={'titles': ['只有一个']}):
+            pipeline._shorten_titles(ol, object(), log=lambda m: None)
+        self.assertEqual(before, ol['sections'][0]['name'])
+        self.assertEqual('一个非常长的整份 PPT 标题超过了二十个字的上限', ol['title'])
+
+    def test_llm_failure_keeps_everything_and_does_not_raise(self):
+        ol = self._outline()
+        before = [ol['title'], ol['sections'][0]['name']]
+        with mock.patch.object(llm, 'ask_json',
+                               side_effect=llm.LLMError('超时')):
+            pipeline._shorten_titles(ol, object(), log=lambda m: None)
+        self.assertEqual(before, [ol['title'], ol['sections'][0]['name']])
+
+    def test_not_actually_shorter_is_rejected(self):
+        """模型原样抄回来（甚至压得更长）不算做成 —— 保留原文。"""
+        ol = self._outline()
+        before = ol['sections'][0]['name']
+        with mock.patch.object(llm, 'ask_json', return_value={
+                'titles': [ol['title'], before, '更' * 40]}):
+            pipeline._shorten_titles(ol, object(), log=lambda m: None)
+        self.assertEqual(before, ol['sections'][0]['name'])
+        self.assertEqual('Dify 是什么：开源 LLM 应用开发平台与它的技术栈分层',
+                         ol['sections'][0]['pages'][0]['title'])
+
+    def test_no_long_title_means_no_model_call(self):
+        ol = dict(title='短', sections=[dict(name='01 甲', pages=[dict(title='乙')])])
+        with mock.patch.object(llm, 'ask_json') as m:
+            pipeline._shorten_titles(ol, object(), log=lambda m: None)
+        self.assertFalse(m.called, '没有超长标题就不该花一次模型调用')
+
+
+class TestSkeletonDigestSplitsSubtitle(unittest.TestCase):
+    """骨架里章名与副题必须**分两行**写。
+
+    早先拼成一行 `## 01 初识 Dify　—　什么是 Dify · 设计初衷 · 九大核心理念`，
+    模型就照抄整行当章节名 —— 那个名字要印在分隔页的 40pt 大字上，
+    一行只放得下约 14 字，必然被截成 `01 初识 Dify　—　什么是 Di…`。
+    """
+
+    def test_name_and_subtitle_are_on_separate_lines(self):
+        sk = dict(chapters=[dict(name='01 初识 Dify', subtitle='什么是 Dify · 设计初衷',
+                                 pages=[dict(name='什么是 Dify', lead='', chars=10)])])
+        txt = structure.skeleton_digest(sk)
+        first = txt.splitlines()[0]
+        self.assertEqual('## 01 初识 Dify', first)
+        self.assertNotIn('—', first, '章名那一行不许带破折号拼出来的副题')
+        self.assertIn('设计初衷', txt)
 
 
 if __name__ == '__main__':
