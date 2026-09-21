@@ -338,12 +338,45 @@ def _officecli_ok() -> bool:
     return bool(visual.find_officecli())
 
 
+def _drop_stale_renders(work: str, pptx: str) -> None:
+    """deck 换了就把上一份的渲染图清掉。
+
+    `work` 是按 deck 名分的（`out/visual/<stem>/`），而同一个源文档反复生成时
+    deck 名不变 —— 于是下面那句「已有 page-NN.png 就跳过渲染」会把**上一次**的图
+    留在原地：页码对不上、页数不同时还会多出几张旧图。
+
+    踩过：11:25 那次跑完，页面上 17 张预览全是 09:23 那一版的 15 页内容，
+    用户按预览里的页码反馈问题，指的根本不是这一版。**预览看着成功，其实是旧的。**
+    """
+    st = os.stat(pptx)
+    stamp = '%d:%d' % (st.st_mtime_ns, st.st_size)
+    mark = os.path.join(work, '.pptx-stamp')
+    try:
+        with open(mark, 'r', encoding='utf-8') as f:
+            if f.read().strip() == stamp:
+                return
+    except OSError:
+        pass
+    for f in os.listdir(work):
+        if f == 'contact-sheet.png' or (f.startswith('page-') and f.endswith('.png')):
+            try:
+                os.remove(os.path.join(work, f))
+            except OSError:
+                pass
+    try:
+        with open(mark, 'w', encoding='utf-8') as f:
+            f.write(stamp)
+    except OSError:
+        pass    # 写不了标记只是下次多渲染一遍，不该让整条链路失败
+
+
 def _render(pptx: str, work: str) -> list[str]:
     from pptx import Presentation
     from pptgen.qa import visual
     if not visual.find_officecli():
         return []
     os.makedirs(work, exist_ok=True)
+    _drop_stale_renders(work, pptx)
     n = len(Presentation(pptx).slides)
     got = []
     for pg in range(1, n + 1):
