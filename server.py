@@ -532,8 +532,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(data)))
         if download:
+            # `http.server` 用 latin-1 编码**整条** header（`send_header` 里
+            # `.encode('latin-1', 'strict')`），而中文文件名不是 latin-1 —— 直接写
+            # `filename="中文.pptx"` 会抛 UnicodeEncodeError。它是 `send_response`
+            # 之后抛的，此时响应头还没 flush，于是连接被直接掐断，浏览器拿到
+            # ERR_EMPTY_RESPONSE / 报错页（实测点「下载」必现）。
+            # 按 RFC 5987 给 `filename*`（百分号编码，纯 ASCII），再留一个 ASCII
+            # 兜底给老客户端。
+            fn = os.path.basename(path)
+            stem, ext = os.path.splitext(fn)
+            ascii_fn = (stem.encode('ascii', 'ignore').decode('ascii').strip() or 'download')
+            if ext.isascii():
+                ascii_fn += ext
             self.send_header('Content-Disposition',
-                             'attachment; filename="%s"' % os.path.basename(path))
+                             "attachment; filename=\"%s\"; filename*=UTF-8''%s"
+                             % (ascii_fn, urllib.parse.quote(fn, safe='')))
         self.end_headers()
         self.wfile.write(data)
 
