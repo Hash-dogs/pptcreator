@@ -25,6 +25,7 @@ import argparse
 import importlib
 import json
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -43,12 +44,20 @@ from pptgen import config as cfg_mod                       # noqa: E402
 from pptgen import parse as parse_mod                      # noqa: E402
 from pptgen import pipeline                                # noqa: E402
 from pptgen import repair as repair_mod                    # noqa: E402
+from pptgen import runlog                                  # noqa: E402
 from pptgen.qa import geometry, visual                     # noqa: E402
 
-SAMPLES = os.path.join(ROOT, 'out', 'samples')
-REPORTS = os.path.join(ROOT, 'out', 'reports')
-VISUAL = os.path.join(ROOT, 'out', 'visual')
-PLANS = os.path.join(ROOT, 'out', 'plans')
+# 目录常量统一走 config.out_sub()（server.py 用的是同一份）——
+# 以前这两处各自硬编码一份 `out/<sub>`，`PPTGEN_OUT` 因此成了死配置。
+#
+# 但 `out_dir()` 是**调用时读 env** 的，而这些常量在 import 期就求值了 ——
+# 不先把 .env 读进来，`PPTGEN_OUT` 改了也不会生效（会静默退回默认的 'out'）。
+# `load_env` 幂等且 override=False，main() 里再调一次无害。
+cfg_mod.load_env()
+SAMPLES = cfg_mod.out_sub('samples')
+REPORTS = cfg_mod.out_sub('reports')
+VISUAL = cfg_mod.out_sub('visual')
+PLANS = cfg_mod.out_sub('plans')
 
 
 def _stem(path: str) -> str:
@@ -72,15 +81,26 @@ def cmd_config(args):
 
 def cmd_parse(args):
     cfg_mod.load_env()
-    doc = parse_mod.parse(_abs(args.src))
-    out = _abs(args.out or os.path.join(PLANS, _stem(args.src) + '.parsed.json'))
-    pipeline.save_json(doc, out)
-    print('[parse] %s（%s）→ %s' % (doc.get('title'), doc['kind'], out))
-    print('[parse] %d 个内容块 / %d 字' % (doc['stats']['blocks'], doc['stats']['chars']))
-    kinds = {}
-    for b in doc['blocks']:
-        kinds[b['type']] = kinds.get(b['type'], 0) + 1
-    print('[parse] 块类型分布: %s' % kinds)
+    with runlog.stage('parse') as st:
+        doc = parse_mod.parse(_abs(args.src))
+        out = _abs(args.out or os.path.join(PLANS, _stem(args.src) + '.parsed.json'))
+        pipeline.save_json(doc, out)
+        print('[parse] %s（%s）→ %s' % (doc.get('title'), doc['kind'], out))
+        print('[parse] %d 个内容块 / %d 字' % (doc['stats']['blocks'], doc['stats']['chars']))
+        kinds = {}
+        for b in doc['blocks']:
+            kinds[b['type']] = kinds.get(b['type'], 0) + 1
+        print('[parse] 块类型分布: %s' % kinds)
+        sk = doc.get('structure') or {}
+        st.update(blocks=doc['stats']['blocks'], chars=doc['stats']['chars'])
+        runlog.note('document', title=doc.get('title'), kind=doc.get('kind'),
+                    blocks=doc['stats']['blocks'], chars=doc['stats']['chars'],
+                    blocks_by_type=kinds, parsed_json=out,
+                    structure={'method': sk.get('method'),
+                               'chapters': len(sk.get('chapters') or []),
+                               'chapter_names': [c['name'] for c in sk.get('chapters') or []],
+                               'pages': sum(len(c['pages']) for c in sk.get('chapters') or [])})
+        runlog.attach_source(_abs(args.src))
     return out
 
 
@@ -90,10 +110,24 @@ def cmd_outline(args):
         doc = pipeline.load_json(_abs(args.parsed))
     else:
         doc = parse_mod.parse(_abs(args.src))
-    outline = pipeline.make_outline(doc)
+    with runlog.stage('outline') as st:
+        outline = pipeline.make_outline(doc)
+        meta = outline.get('_meta') or {}
+        st.update(pages=outline.get('page_count'), sections=len(outline.get('sections') or []))
+        runlog.note('outline', generated_by=meta.get('generated_by'),
+                    model=meta.get('model'), sections=len(outline.get('sections') or []),
+                    pages=outline.get('page_count'),
+                    page_range=outline.get('_page_range'),
+                    chapter_names=[s['name'] for s in outline.get('sections') or []],
+                    warnings=meta.get('warnings') or [])
     stem = _stem(args.src or doc['source'])
+    # 把刚解析出来的 doc **一并落盘**：下一步 `plan` 从 parsed.json 读锚点，
+    # 而解析结果里带着结构骨架。不写的话 `plan` 会读到上一次的旧文件
+    # （甚至是没有 structure 的老格式），锚点全部落空且不报错。
+    pipeline.save_json(doc, _abs(os.path.join(PLANS, stem + '.parsed.json')))
     jpath = _abs(args.out or os.path.join(PLANS, stem + '.outline.json'))
     pipeline.save_json(outline, jpath)
+    runlog.attach_file('outline_json', jpath)
     mpath = os.path.splitext(jpath)[0] + '.md'
     with open(mpath, 'w', encoding='utf-8') as f:
         f.write(pipeline.outline_preview(outline) + '\n')
@@ -119,16 +153,20 @@ def cmd_plan(args):
             doc = pipeline.load_json(cand)
         else:
             raise SystemExit('找不到解析结果 %s，请加 --parsed 指定，或先跑 parse' % cand)
-    plan = pipeline.make_plan(outline, doc)
-    # <stem>.outline.json → <stem>.deck.json（去掉 .outline 再拼）
-    out = _abs(args.out or (base[:-len('.outline')] if base.endswith('.outline') else base)
-               + '.deck.json')
-    pipeline.save_json(plan, out)
-    counts = {}
-    for s in plan['slides']:
-        counts[s['layout']] = counts.get(s['layout'], 0) + 1
-    print('[plan] %d 页 → %s' % (len(plan['slides']), out))
-    print('[plan] 版式分布: %s' % counts)
+    with runlog.stage('plan') as st:
+        plan = pipeline.make_plan(outline, doc)
+        # <stem>.outline.json → <stem>.deck.json（去掉 .outline 再拼）
+        out = _abs(args.out or (base[:-len('.outline')] if base.endswith('.outline') else base)
+                   + '.deck.json')
+        pipeline.save_json(plan, out)
+        counts = {}
+        for s in plan['slides']:
+            counts[s['layout']] = counts.get(s['layout'], 0) + 1
+        print('[plan] %d 页 → %s' % (len(plan['slides']), out))
+        print('[plan] 版式分布: %s' % counts)
+        st.update(slides=len(plan['slides']))
+        runlog.note('plan', slides=len(plan['slides']), layouts=counts,
+                    generated_by=plan.get('_generated_by'), deck_json=out)
     return out
 
 
@@ -140,14 +178,24 @@ def cmd_build(args):
         spec = _content(args.content)
     stem = args.name or (_stem(args.spec) if args.spec else args.content)
     out = _abs(args.out or os.path.join(SAMPLES, '%s.pptx' % stem))
-    build_mod.build(spec, args.template or cfg_mod.template_path(), out, fill_toc=True)
-    print('[build] %s（%d 页正文 + 公司封面/目录/封底）' % (out, len(spec['slides'])))
-    print('[build] 结构自检通过')
+    with runlog.stage('build') as st:
+        build_mod.build(spec, args.template or cfg_mod.template_path(), out, fill_toc=True)
+        print('[build] %s（%d 页正文 + 公司封面/目录/封底）' % (out, len(spec['slides'])))
+        print('[build] 结构自检通过')
+        st.update(slides=len(spec['slides']))
+        # 只在 build **成功**之后归档：build() 是先 save 再 selfcheck，
+        # 自检不过时磁盘上已经有一个不合格的 pptx，别把它当成品记下来。
+        runlog.attach_pptx(out)
     return out
 
 
 def cmd_qa(args):
     cfg_mod.load_env()
+    with runlog.stage('qa') as st:
+        return _qa(args, st)
+
+
+def _qa(args, st):
     path = _abs(args.file) if args.file else _latest_pptx()
     os.makedirs(REPORTS, exist_ok=True)
     rep = geometry.analyse(path)
@@ -160,20 +208,35 @@ def cmd_qa(args):
     print(geometry.format_report(rep))
     stem = _stem(path)
     pipeline.save_json(rep, os.path.join(REPORTS, stem + '.geometry.json'))
-    # .md 而不是 .txt：本机 DLP 会按扩展名加密 .txt
     with open(os.path.join(REPORTS, stem + '.geometry.md'), 'w', encoding='utf-8') as f:
         f.write('# 几何 QA 报告\n\n```\n' + geometry.format_report(rep) + '\n```\n')
+    s = rep['summary']
+    st.update(error=s['error'], warn=s['warn'])
+    runlog.note('qa', error=s['error'], warn=s['warn'], issues=rep['issues'][:20],
+                # 无参数跑 qa 时是按 mtime 挑的产物，记下来才知道「检查的到底是哪一份」
+                checked=path)
     return rep
 
 
 def cmd_render(args):
     cfg_mod.load_env()
+    with runlog.stage('render') as st:
+        return _render(args, st)
+
+
+def _render(args, st):
     path = _abs(args.file) if args.file else _latest_pptx()
     stem = _stem(path)
     rp = os.path.join(REPORTS, stem + '.geometry.json')
     rep = pipeline.load_json(rp) if os.path.isfile(rp) else None
     res = visual.run(path, os.path.join(VISUAL, stem), geometry_report=rep)
     print(visual.format_report(res))
+    st.update(mode=res.get('mode'), pages=len(res.get('verdicts') or []))
+    runlog.note('render', mode=res.get('mode'), rendered=path,
+                contact_sheet=res.get('sheet'),
+                visual_dir=os.path.join(VISUAL, stem),
+                # 有没有读到几何报告会影响行为（geometry_report=None 时不做细看）
+                geometry_report_found=rep is not None)
     return res
 
 
@@ -197,14 +260,22 @@ def cmd_repair(args):
         print('  → %d error / %d warn' % (s['error'], s['warn']))
         return rep
 
-    print('[repair] 开始（最多 %d 轮）' % rounds)
-    deck, final = repair_mod.repair_deck(deck, build_qa, rounds=rounds)
-    print('[repair] %s' % repair_mod.repair_summary(state['before'] or {}, final))
+    with runlog.stage('repair') as st:
+        print('[repair] 开始（最多 %d 轮）' % rounds)
+        deck, final = repair_mod.repair_deck(deck, build_qa, rounds=rounds)
+        print('[repair] %s' % repair_mod.repair_summary(state['before'] or {}, final))
 
-    spec_out = os.path.splitext(_abs(args.spec))[0] + '.repaired.json'
-    pipeline.save_json(deck, spec_out)
-    print('[repair] 修正后的 spec → %s' % spec_out)
-    print('[repair] 成品 → %s' % out_pptx)
+        spec_out = os.path.splitext(_abs(args.spec))[0] + '.repaired.json'
+        pipeline.save_json(deck, spec_out)
+        print('[repair] 修正后的 spec → %s' % spec_out)
+        print('[repair] 成品 → %s' % out_pptx)
+        before, after = (state['before'] or {}).get('summary', {}), final.get('summary', {})
+        st.update(rounds=rounds)
+        runlog.note('repair', rounds=rounds,
+                    before={'error': before.get('error'), 'warn': before.get('warn')},
+                    after={'error': after.get('error'), 'warn': after.get('warn')},
+                    repaired_json=spec_out)
+        runlog.attach_pptx(out_pptx)
     return out_pptx
 
 
@@ -323,10 +394,49 @@ def main():
                    help='跳过人工确认直接往下走（默认会在大纲处停下）')
 
     args = ap.parse_args()
-    {'config': cmd_config, 'parse': cmd_parse, 'outline': cmd_outline,
-     'plan': cmd_plan, 'build': cmd_build, 'repair': cmd_repair,
-     'full': cmd_full, 'qa': cmd_qa, 'render': cmd_render,
-     'all': cmd_all, 'auto': cmd_auto}[args.cmd](args)
+    # 顺序有讲究：`load_env` 必须在 scope 之前 —— 目录常量是调用时读 env 的
+    # （见文件顶部 out_sub 那段注释）。`config` 是唯一既不消费也不产出任何东西的
+    # 命令，给它建文件夹纯属噪音，所以不进 scope。
+    cfg_mod.load_env()
+    if args.cmd == 'config':
+        return cmd_config(args)
+    with runlog.scope(_task_name(args), origin='cli', command=args.cmd) as rl:
+        rl.put('config', runlog.config_snapshot())
+        with runlog.tee(rl):
+            {'config': cmd_config, 'parse': cmd_parse, 'outline': cmd_outline,
+             'plan': cmd_plan, 'build': cmd_build, 'repair': cmd_repair,
+             'full': cmd_full, 'qa': cmd_qa, 'render': cmd_render,
+             'all': cmd_all, 'auto': cmd_auto}[args.cmd](args)
+        if rl.dir:
+            print()
+            print('[log] %s' % rl.dir)
+
+
+# 中间产物的后缀，别让它混进任务名（`x.outline.json` → `x`）
+_STAGE_SUFFIX = re.compile(r'\.(parsed|outline|deck|repaired)$')
+
+
+def _task_name(args) -> str:
+    """日志文件夹里那个「任务名」。
+
+    优先用用户显式给的名字（`--name`），否则用源文件 / 输入产物的 stem ——
+    文档的身份比 pptx 的标签更贴近「这次流程在做什么」。
+    """
+    if getattr(args, 'name', None):
+        return str(args.name)
+    for attr in ('src', 'spec', 'file', 'outline', 'parsed'):
+        v = getattr(args, attr, None)
+        if v:
+            # `out/plans/x.outline.json` → `x`，而不是 `x.outline`
+            return _STAGE_SUFFIX.sub('', _stem(v))
+    # `qa` / `render` 不带 --file 时按 mtime 挑产物，名字要跟着那份产物走 ——
+    # 否则一摞文件夹全叫 `run`，事后根本认不出哪个是查哪一份的。
+    if getattr(args, 'cmd', '') in ('qa', 'render'):
+        try:
+            return _stem(_latest_pptx())
+        except SystemExit:
+            pass
+    return 'run'
 
 
 if __name__ == '__main__':

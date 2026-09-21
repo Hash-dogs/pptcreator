@@ -64,7 +64,7 @@ def overflowing_slides(report: dict) -> dict[int, list[str]]:
     return out
 
 
-def repair_slide(spec: dict, problems: list[str], cfg) -> dict:
+def repair_slide(spec: dict, problems: list[str], cfg, log=print) -> dict:
     """让模型重写单页 spec，压到容量以内。失败则原样返回。"""
     name = spec.get('layout')
     cap = LAYOUT_CAPACITY.get(name, '尽量精简，控制在原文的 60% 以内。')
@@ -89,15 +89,15 @@ def repair_slide(spec: dict, problems: list[str], cfg) -> dict:
     if isinstance(data, dict) and isinstance(data.get('slides'), list) and data['slides']:
         data = data['slides'][0]
     if not isinstance(data, dict):
-        print('      [跳过] 模型未返回对象（%s）' % type(data).__name__)
+        log('      [跳过] 模型未返回对象（%s）' % type(data).__name__)
         return spec
     if data.get('layout') != name:
         # 版式被改掉会让下游渲染走错分支，宁可原样保留
-        print('      [跳过] 模型改了 layout：%r → %r' % (name, data.get('layout')))
+        log('      [跳过] 模型改了 layout：%r → %r' % (name, data.get('layout')))
         return spec
     if _text_len(data) >= _text_len(spec):
-        print('      [跳过] 压缩后并未变短（%d → %d 字）'
-              % (_text_len(spec), _text_len(data)))
+        log('      [跳过] 压缩后并未变短（%d → %d 字）'
+            % (_text_len(spec), _text_len(data)))
         return spec
     return data
 
@@ -118,16 +118,22 @@ def _dump(o) -> str:
     return json.dumps(o, ensure_ascii=False, indent=1)[:3000]
 
 
-def repair_deck(deck: dict, build_qa, *, rounds: int = 3, verbose: bool = True) -> tuple[dict, dict]:
+def repair_deck(deck: dict, build_qa, *, rounds: int = 3, verbose: bool = True,
+                on_log=None) -> tuple[dict, dict]:
     """build → qa → 修 的循环。
 
     build_qa(spec) 由调用方注入，返回几何报告（因为它要用到 build 与 qa 两个模块，
     放在这里会形成循环依赖）。
+
+    `on_log` 是日志出口（Web 端必须给，见下面 verbose 的说明）。
     """
+    # `verbose` 只管控制台，`on_log` 管日志 —— 两者是正交的。服务器传
+    # verbose=False 是为了别把控制台刷满，但那些行（尤其「跳过 / 压缩后并未变短」）
+    # 恰恰是判断修复到底有没有生效的依据，必须进日志。
+    log = on_log or (print if verbose else (lambda m: None))
     cfg = config.llm_config()
     if cfg is None:
-        if verbose:
-            print('[repair] 未配置文本模型，跳过修复回环')
+        log('[repair] 未配置文本模型，跳过修复回环')
         return deck, {}
 
     report = {}
@@ -135,26 +141,22 @@ def repair_deck(deck: dict, build_qa, *, rounds: int = 3, verbose: bool = True) 
         report = build_qa(deck)
         todo = overflowing_slides(report)
         if not todo:
-            if verbose:
-                print('[repair] 第 %d 轮：几何检查已干净，停止' % r)
+            log('[repair] 第 %d 轮：几何检查已干净，停止' % r)
             break
-        if verbose:
-            print('[repair] 第 %d 轮：%d 页需要压缩' % (r, len(todo)))
+        log('[repair] 第 %d 轮：%d 页需要压缩' % (r, len(todo)))
         for idx, problems in sorted(todo.items()):
             if idx >= len(deck['slides']):
                 continue
             old = deck['slides'][idx]
             try:
-                new = repair_slide(old, problems, cfg)
+                new = repair_slide(old, problems, cfg, log)
             except llm.LLMError as e:
-                print('[repair]   第 %d 页修复失败：%s' % (idx + 1, str(e)[:120]))
+                log('[repair]   第 %d 页修复失败：%s' % (idx + 1, str(e)[:120]))
                 continue
             deck['slides'][idx] = new
-            if verbose:
-                print('[repair]   第 %d 页已压缩（%s）' % (idx + 1, old.get('layout')))
+            log('[repair]   第 %d 页已压缩（%s）' % (idx + 1, old.get('layout')))
     else:
-        if verbose:
-            print('[repair] 达到最大轮数 %d，仍有未解决问题' % rounds)
+        log('[repair] 达到最大轮数 %d，仍有未解决问题' % rounds)
     return deck, report
 
 
