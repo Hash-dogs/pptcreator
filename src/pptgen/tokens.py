@@ -36,7 +36,11 @@ Y_PAGENUM = 7.18
 
 # ── 品牌色（取自模板 theme1.xml 的 clrScheme）─────────────────
 RED   = RGBColor(0xD3, 0x12, 0x45)   # accent1 —— 强调，只打在单一焦点上
-BLUE  = RGBColor(0x00, 0x46, 0x7F)   # accent4 —— 结构色
+# accent4。**版式里不要再拿它当结构色** —— 模板自己的页面从不用蓝（theme1 里
+# accent4 只出现在一个空段落的 endParaRPr 上，是残留不是设计）。早先表格表头、
+# 节点框、支撑数字都用了它，成品里那几页明显跳出色系。留着这份定义只是为了让
+# `resolve_color('BLUE')` 仍然可用，别在 layouts.py 里引用。
+BLUE  = RGBColor(0x00, 0x46, 0x7F)   # accent4 —— 未使用
 DARK  = RGBColor(0x23, 0x1F, 0x20)   # accent3 —— 正文
 MUTED = RGBColor(0x64, 0x64, 0x63)   # accent5 —— 次要
 GREY  = RGBColor(0x80, 0x7F, 0x83)   # accent2
@@ -95,7 +99,7 @@ def dot(slide, x, y, size=0.10, color=RED):
     return _rect(slide, x, y, size, size, color)
 
 
-def outline_box(slide, x, y, w, h, color=BLUE, radius=0.10):
+def outline_box(slide, x, y, w, h, color=DARK, radius=0.10):
     """1px 描边、无填充的容器（zcode 明确许可的形态）。"""
     return _rect(slide, x, y, w, h, color, outline=True, radius=radius)
 

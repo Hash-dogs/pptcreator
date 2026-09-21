@@ -23,7 +23,7 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.oxml.ns import qn
 
 from .tokens import (
-    LEFT, RIGHT, W, FS, RED, BLUE, DARK, MUTED, GREY, RULE, TINT, WHITE,
+    LEFT, RIGHT, W, FS, RED, DARK, MUTED, GREY, RULE, TINT, WHITE,
     EA, LAT, Y_CONTENT, Y_CONTENT_BOTTOM, Y_SOURCE,
     put, hrule, vrule, dot, outline_box, tint_band,
     header, footer, fit_one_line,
@@ -115,9 +115,11 @@ def render_stat_hero(s, spec):
         for i, st in enumerate(stats):
             x = LEFT + i * cw
             # 数字框高 0.6"，30pt 只够一行 —— 必须截断，否则折行溢出
+            # 支撑数字用 DARK 而不是 BLUE：一页里只允许 hero 那一个红焦点，
+            # 支撑数据是次级信息，走正文色。
             put(s, x, 4.90, cw - 0.45, 0.6,
                 [[(_fit(st['num'], cw - 0.45, 30),
-                   dict(size=30, color=BLUE, bold=True))]])
+                   dict(size=30, color=DARK, bold=True))]])
             put(s, x, 5.56, cw - 0.45, 0.9,
                 [[(st['label'], dict(size=FS['small'], color=MUTED))]], ls=1.3)
     footer(s, spec['page'], spec.get('source'))
@@ -197,7 +199,7 @@ def render_comparison_rows(s, spec):
     x3 = LEFT + 6.9
     put(s, x1, 2.10, 2.3, 0.4, [[('维度', dict(size=FS['small'], color=MUTED, bold=True))]])
     put(s, x2, 2.10, cw, 0.4, [[(spec['col_a'], dict(size=FS['small'], color=GREY, bold=True))]])
-    put(s, x3, 2.10, cw, 0.4, [[(spec['col_b'], dict(size=FS['small'], color=BLUE, bold=True))]])
+    put(s, x3, 2.10, cw, 0.4, [[(spec['col_b'], dict(size=FS['small'], color=DARK, bold=True))]])
     hrule(s, LEFT, 2.46, W)
     # 行高自适应：固定 1.32" 时 4 行会溢出到 y=7.78（超出 7.50 画布），
     # 实测被 officecli 与本项目几何检查同时抓到。按可用高度均分即可。
@@ -229,7 +231,8 @@ def render_process_chain(s, spec):
         x = LEFT + i * (cw + gap)
         put(s, x, 2.35, cw, 0.55,
             [[(st['num'], dict(size=26, color=RED, bold=True))]])
-        dot(s, x, 3.165, 0.11, BLUE)
+        # 标记点走次要灰（accent2）：它是结构分隔，不是焦点，红色留给步骤序号
+        dot(s, x, 3.165, 0.11, GREY)
         # 步骤名框高 0.45"，17pt 只够一行
         put(s, x, 3.52, cw, 0.45,
             [[(_fit(st['name'], cw, FS['h3']),
@@ -260,7 +263,7 @@ def render_timeline_vertical(s, spec):
         put(s, 0.30, y, 0.58, 0.4,
             [[('%02d' % (i + 1), dict(size=14, color=RED, bold=True))]],
             align=PP_ALIGN.RIGHT, anchor=MSO_ANCHOR.MIDDLE)
-        dot(s, 0.965, y + 0.13, 0.11, BLUE)
+        dot(s, 0.965, y + 0.13, 0.11, GREY)
         put(s, 1.30, y, 10.7, 0.4,
             [[(st['name'], dict(size=15, color=DARK, bold=True)),
               ('   ' + st['desc'], dict(size=FS['small'], color=MUTED))]],
@@ -287,7 +290,7 @@ def render_node_flow(s, spec):
         x = LEFT + col * (bw + gapx)
         y = y0 + row * rowgap
         is_accent = i in accent
-        b = outline_box(s, x, y, bw, bh, RED if is_accent else BLUE)
+        b = outline_box(s, x, y, bw, bh, RED if is_accent else DARK)
         tf = b.text_frame
         tf.word_wrap = True
         tf.vertical_anchor = MSO_ANCHOR.MIDDLE
@@ -299,7 +302,7 @@ def render_node_flow(s, spec):
         r.text = _fit(nm, bw - 0.20, FS['small'])
         r.font.size = Pt(FS['small'])
         r.font.bold = True
-        r.font.color.rgb = RED if is_accent else BLUE
+        r.font.color.rgb = RED if is_accent else DARK
         r.font.name = LAT
         rPr = r._r.get_or_add_rPr()
         el = rPr.makeelement(qn('a:ea'), {})
@@ -350,7 +353,10 @@ def render_data_table(s, spec):
             cell.margin_top = cell.margin_bottom = Inches(0.06)
             cell.vertical_anchor = MSO_ANCHOR.MIDDLE
             cell.fill.solid()
-            cell.fill.fore_color.rgb = BLUE if r == 0 else WHITE
+            # 表头用近黑 DARK 而不是 accent4 蓝：模板自身的页面从不用蓝（theme1 里
+            # accent4 只出现在一个空段落的 endParaRPr 上，是残留不是设计），
+            # 整条深色带比深藏青更贴「红顶栏 + 深色正文」这套语言，也不跟红顶栏抢。
+            cell.fill.fore_color.rgb = DARK if r == 0 else WHITE
             tf = cell.text_frame
             tf.word_wrap = True
             p = tf.paragraphs[0]
@@ -358,8 +364,11 @@ def render_data_table(s, spec):
             run = p.add_run()
             run.text = data[r][c]
             run.font.size = Pt(spec.get('font', 13.5) if r else spec.get('font', 13.5) - 0.5)
+            # 首列与正文同为 DARK —— 层级只靠加粗区分。原来首列是蓝色，
+            # 等于在正文区又开了一个色相；现在整页只有表头那一条深色带和
+            # 页眉那一抹红，色相收敛到两个。
             run.font.bold = (r == 0) or (c == 0)
-            run.font.color.rgb = WHITE if r == 0 else (BLUE if c == 0 else DARK)
+            run.font.color.rgb = WHITE if r == 0 else DARK
             run.font.name = LAT
             rPr = run._r.get_or_add_rPr()
             el = rPr.makeelement(qn('a:ea'), {})
