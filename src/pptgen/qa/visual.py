@@ -81,6 +81,12 @@ def model_config():
 
 
 # ── 渲染 ──────────────────────────────────────────────────────
+# officecli 的 stdout 是 UTF-8，而 `text=True` 会用系统 locale（中文 Windows 上是
+# GBK）去解码 —— 路径里只要有一个字节不是合法 GBK 序列，subprocess.run 就抛
+# UnicodeDecodeError，整个逐页渲染中断（只留下联系表）。显式指定 UTF-8 并容错。
+_SUBPROC = dict(capture_output=True, encoding='utf-8', errors='replace')
+
+
 def render_pages(pptx: str, out_dir: str, pages: list[int] | None = None,
                  native: bool = True) -> dict[int, str]:
     """用 officecli 逐页渲染 PNG，返回 {页码: 路径}。"""
@@ -94,11 +100,11 @@ def render_pages(pptx: str, out_dir: str, pages: list[int] | None = None,
         cmd = [exe, 'view', pptx, 'screenshot', '--page', str(pg), '-o', out]
         if native:
             cmd += ['--render', 'native']
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(cmd, **_SUBPROC)
         if r.returncode != 0 or not os.path.isfile(out):
             # native 渲染器在部分环境下不稳定，退回默认渲染
             cmd = [exe, 'view', pptx, 'screenshot', '--page', str(pg), '-o', out]
-            r = subprocess.run(cmd, capture_output=True, text=True)
+            r = subprocess.run(cmd, **_SUBPROC)
         if os.path.isfile(out):
             got[pg] = out
     return got
@@ -112,10 +118,9 @@ def render_contact_sheet(pptx: str, out_path: str, cols: int = 3,
         raise RuntimeError('未找到 officecli，无法渲染')
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     base = [exe, 'view', pptx, 'screenshot', '--grid', str(cols), '-o', out_path]
-    r = subprocess.run(base + (['--render', 'native'] if native else []),
-                       capture_output=True, text=True)
+    subprocess.run(base + (['--render', 'native'] if native else []), **_SUBPROC)
     if not os.path.isfile(out_path):
-        subprocess.run(base, capture_output=True, text=True)
+        subprocess.run(base, **_SUBPROC)
     return out_path if os.path.isfile(out_path) else None
 
 
