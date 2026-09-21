@@ -4,78 +4,130 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>文档转 PPT</title>
+<!-- 内联一个方块图标：省一次请求，也免得 favicon.ico 报 404 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23D31245'/%3E%3Ctext x='16' y='23' font-family='Segoe UI,sans-serif' font-size='19' font-weight='700' fill='%23fff' text-anchor='middle'%3EM%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
-<header class="topbar">
-  <div class="wrap">
-    <div class="brand"><span class="dot"></span>文档转 PPT <em>· 迈胜模板</em></div>
-    <div id="cfg" class="cfg">读取配置…</div>
-  </div>
-</header>
+<div class="app-shell">
 
-<main class="wrap">
-
-  <!-- ── 步骤 1 ─────────────────────────────────────────── -->
-  <section class="card" id="step1">
-    <div class="stephead"><span class="num">1</span><h2>选择源文档</h2></div>
-    <p class="hint">
-      支持 <code>.pptx</code> <code>.docx</code> <code>.pdf</code> <code>.txt</code> <code>.md</code>。
-      文件放在项目根目录 <code>C:\gyb-software\programs\program-pptcreator02\</code> 下。
-    </p>
-    <div class="row">
-      <select id="src"></select>
-      <button id="btnOutline" class="primary">生成大纲</button>
+  <!-- ── 左侧栏：品牌 / 新建 / 状态 / 进度 ─────────────────── -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">M</div>
+      <div>
+        <h1>文档转 PPT</h1>
+        <p>迈胜模板 · AI Presentation Builder</p>
+      </div>
     </div>
-    <div id="srcInfo" class="srcinfo"></div>
-  </section>
 
-  <!-- ── 步骤 2 ─────────────────────────────────────────── -->
-  <section class="card muted" id="step2">
-    <div class="stephead">
-      <span class="num">2</span><h2>审阅并修改大纲</h2>
-      <span id="outlineMeta" class="meta"></span>
-    </div>
-    <p class="hint">
-      这是**人工确认的落点**——章节名和页标题都可以直接改。确认后才会进入生成。
-    </p>
-    <div id="outlineEditor" class="outline"></div>
-    <details class="adv">
-      <summary>高级：直接编辑 JSON</summary>
-      <textarea id="outlineJson" spellcheck="false"></textarea>
-    </details>
-    <div class="row end">
-      <label class="inline">修复轮数
-        <input id="rounds" type="number" value="3" min="0" max="6" style="width:64px">
-      </label>
-      <label class="inline">输出文件名
-        <input id="deckName" type="text" value="mydeck" style="width:150px">
-      </label>
-      <button id="btnGenerate" class="primary">生成 PPT</button>
-    </div>
-  </section>
+    <button id="newBtn" class="primary full">新建 PPT</button>
 
-  <!-- ── 步骤 3 ─────────────────────────────────────────── -->
-  <section class="card muted" id="step3">
-    <div class="stephead">
-      <span class="num">3</span><h2>生成进度</h2>
-      <span id="jobState" class="meta"></span>
-    </div>
-    <pre id="log" class="log"></pre>
-  </section>
+    <div id="statusBar" class="status sidebar-status">等待输入</div>
 
-  <!-- ── 步骤 4 ─────────────────────────────────────────── -->
-  <section class="card muted" id="step4">
-    <div class="stephead">
-      <span class="num">4</span><h2>预览与下载</h2>
-      <span id="qaBadge" class="meta"></span>
-    </div>
-    <div id="resultBar" class="row"></div>
-    <div id="gallery" class="gallery"></div>
-  </section>
+    <section id="progressPanel" class="progress-panel sidebar-progress hidden">
+      <div class="progress-head">
+        <strong>制作进度</strong>
+        <span>实时刷新</span>
+      </div>
+      <div id="progressList" class="progress-list"></div>
+    </section>
 
-</main>
+    <div id="cfg" class="sidebar-foot">读取配置…</div>
+  </aside>
+
+  <!-- ── 主区 ──────────────────────────────────────────────── -->
+  <main class="main">
+    <div class="page-head">
+      <div>
+        <h2>生成公司模板 PPT</h2>
+        <p>上传 Word / PDF / 文本，或选用项目里已有的文档 —— 先确认大纲，再生成可下载的 pptx。</p>
+      </div>
+    </div>
+
+    <!-- 选源 -->
+    <section class="composer">
+      <div class="source-panel">
+
+        <div class="source-line">
+          <label class="source-radio">
+            <input type="radio" name="sourceMode" value="upload" checked> 上传文件
+          </label>
+          <div class="upload-area" id="dropZone">
+            <input id="files" type="file" multiple hidden>
+            <div class="drop-hint">
+              把文件拖到这里，或
+              <button type="button" id="browseBtn" class="link">选择文件</button>
+              <span id="acceptHint" class="muted"></span>
+            </div>
+            <div id="fileList" class="file-list"></div>
+          </div>
+        </div>
+
+        <div class="source-line">
+          <label class="source-radio">
+            <input type="radio" name="sourceMode" value="existing"> 选择已有文档
+          </label>
+          <select id="src" disabled></select>
+        </div>
+
+        <div class="source-line action-line">
+          <div class="action-settings">
+            <label class="detail-control">输出文件名
+              <input id="deckName" type="text" value="mydeck">
+            </label>
+            <label class="detail-control">修复轮数
+              <input id="rounds" type="number" value="3" min="0" max="6">
+            </label>
+          </div>
+          <button id="btnOutline" class="primary">生成大纲</button>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- 大纲确认 -->
+    <section class="panel" id="outlinePanel">
+      <div class="panel-title">
+        <h3>大纲确认</h3>
+        <span id="outlineMeta" class="meta"></span>
+      </div>
+      <p class="hint" id="outlineHint">
+        这是<strong>人工确认的落点</strong> —— 章节名和页标题都可以直接在下面改，改完再生成。
+      </p>
+      <div id="outlineWarn" class="outline-warn" hidden></div>
+      <div id="outlineEditor" class="outline"></div>
+      <details class="advanced-editor">
+        <summary>高级：直接编辑 JSON</summary>
+        <textarea id="outlineJson" class="json-editor" spellcheck="false"></textarea>
+      </details>
+      <div class="panel-actions">
+        <button id="btnGenerate" class="primary" disabled>生成 PPT</button>
+      </div>
+    </section>
+
+    <!-- 日志 -->
+    <section class="panel" id="logPanel">
+      <div class="panel-title">
+        <h3>生成日志</h3>
+        <span id="jobState" class="meta"></span>
+      </div>
+      <pre id="log" class="log empty">（还没有任务）</pre>
+    </section>
+
+    <!-- 结果 -->
+    <section class="panel" id="resultPanel">
+      <div class="panel-title">
+        <h3>生成结果</h3>
+        <span id="qaBadge" class="meta"></span>
+      </div>
+      <div id="downloadArea" class="download-area empty">生成完成后，这里会出现下载链接与逐页预览。</div>
+      <div id="previewGrid" class="preview-grid"></div>
+    </section>
+
+  </main>
+</div>
 
 <script src="/static/app.js"></script>
 </body>

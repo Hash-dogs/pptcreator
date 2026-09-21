@@ -3,3 +3,7 @@
 out/
 __pycache__/
 *.pyc
+
+# 浏览器自动化（playwright skill）留下的产物
+.playwright-cli/
+output/
