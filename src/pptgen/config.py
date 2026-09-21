@@ -167,6 +167,18 @@ def plan_max_tokens() -> int:
     return _stage_max_tokens('PPTGEN_PLAN_MAX_TOKENS', _STAGE_TOKEN_FLOOR)
 
 
+def section_dividers() -> bool:
+    """是否在正文里插入章节分隔页（每章开头一页）。
+
+    分隔页是**结构页**：它让「换章了」这件事在翻页时可见 —— 在此之前 5 个章节
+    只靠左上角那行 kicker 区分。但它要占页数预算，所以 `pipeline._divider_budget()`
+    只在「扣掉之后每章还留得下一页正文」时才插；装不下就完全不插。
+
+    关掉它：`.env` 里设 `PPTGEN_SECTION_DIVIDERS=0`。
+    """
+    return get_bool('PPTGEN_SECTION_DIVIDERS', True)
+
+
 def content_mode() -> str:
     m = (get('PPTGEN_CONTENT_MODE', 'balance') or 'balance').lower()
     return m if m in ('strict', 'balance', 'enrich') else 'balance'
@@ -225,7 +237,8 @@ def summary() -> str:
         '配置状态',
         '  文本模型 : %s' % (llm or '未配置（大纲/规划将走确定性模式）'),
         '  视觉模型 : %s' % (vis or '未配置（看图输出人工复核包）'),
-        '  页数区间 : %d–%d' % (lo, hi),
+        '  页数区间 : %d–%d（正文；章节分隔页另计）' % (lo, hi),
+        '  章节分隔 : %s' % ('插入' if section_dividers() else '不插（PPTGEN_SECTION_DIVIDERS=0）'),
         '  内容策略 : %s' % content_mode(),
         '  模板     : %s' % template_path(),
         '  输出目录 : %s' % out_dir(),

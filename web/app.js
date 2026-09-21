@@ -368,8 +368,12 @@ function renderOutline(o) {
   // 让整块大纲渲染崩掉，而崩了之后页面上什么都不显示，很难看出原因。
   const range = o._page_range || [0, 0];
   const sections = o.sections || [];
+  // page_count 只数**正文页**：章节分隔页是结构页，不占正文页数预算，
+  // 但确实会出现在成品里 —— 不写出来的话，用户会以为页数算错了。
+  const div = o.divider_count || 0;
   $('outlineMeta').textContent =
-    '共 ' + (o.page_count || 0) + ' 页正文　目标 ' + range[0] + '–' + range[1];
+    '共 ' + (o.page_count || 0) + ' 页正文　目标 ' + range[0] + '–' + range[1]
+    + (div ? '　+ ' + div + ' 页章节分隔页（合计 ' + (o.total_pages || 0) + ' 页）' : '');
   renderOutlineWarn(o._meta);
   let n = 0;
   box.innerHTML = sections.map((s, si) => {

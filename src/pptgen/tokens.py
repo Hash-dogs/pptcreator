@@ -193,6 +193,19 @@ def header(slide, kicker=None, title=None):
             [[(title, dict(size=FS['title'], color=DARK, bold=True))]])
 
 
+# 本次生成的截断记录。截断是**静默**的：它消除了溢出，于是几何检查全绿，
+# 问题只在你肉眼看渲染图时才暴露（实测 node_flow 8 个节点里 6 个被截成
+# `小红书正文 · 爆款写作…`，而几何报告是干净的）。记下来，由 build() 收走写进日志。
+TRUNCATIONS: list[tuple[str, str]] = []
+
+
+def take_truncations() -> list[tuple[str, str]]:
+    """取走并清空截断记录，返回 [(原文, 截断后), ...]。"""
+    got = list(TRUNCATIONS)
+    TRUNCATIONS.clear()
+    return got
+
+
 def fit_one_line(text: str, max_in: float, size_pt: float, lines: int = 1) -> str:
     """把文本裁到 `lines` 行内放得下（超出加省略号）。
 
@@ -205,7 +218,9 @@ def fit_one_line(text: str, max_in: float, size_pt: float, lines: int = 1) -> st
     for i, ch in enumerate(text):
         w += size_pt * (1.0 if ord(ch) > 0x2E80 else 0.52)
         if w > limit:
-            return text[:max(i - 1, 1)].rstrip() + '…'
+            out = text[:max(i - 1, 1)].rstrip() + '…'
+            TRUNCATIONS.append((text, out))
+            return out
     return text
 
 

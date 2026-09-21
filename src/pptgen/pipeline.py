@@ -11,74 +11,20 @@ import json
 import os
 import re
 
-from . import config, llm, structure
+from . import config, layout_spec, llm, structure
 from .layouts import LAYOUT_NAMES
 
 
 # ══════════════════════════════════════════════════════════════
-# 版式目录 —— 喂给模型，让它知道每页能挑哪些版式、各自要填什么
+# 版式目录 —— 从 layout_spec 的注册表生成，不在这里手写
+#
+# 早先这份目录、`layouts.LAYOUTS`、`repair.LAYOUT_CAPACITY` 是三份彼此独立
+# 手写的清单，已经漂移（`stats.label` 一处 ≤20 字、一处 ≤22 字 —— 模型先看到
+# 20，被压时被告知 22）。现在只有注册表一处。
 # ══════════════════════════════════════════════════════════════
-LAYOUT_CATALOG = """
-**每个版式都有两个公共字段**（别漏，页眉靠它们）：
-  title  —— 本页标题，一句话主张，≤24 字。statement / quote 没有标题位，不用给。
-  kicker —— 左上角小字章节标签，填所属章节名（如「03 Dify 能做什么」）。
-  source —— 页脚来源标注。
+def layout_catalog() -> str:
+    return layout_spec.catalog_text()
 
-可用版式（layout 字段填左边的名字）：
-
-1. statement —— 大字陈述。适合开篇、章节引言、一句话主张。
-   必填 lines: [[(文本,{})], ...] 每行一段；关键词用 {"hl":true} 着强调色。
-   选填 kicker, body: [段落...], source
-
-2. stat_hero —— 一个大数字 + 右侧说明 + 一排支撑数据。适合核心指标页。
-   必填 hero: {"num":"87","unit":" 亿美元"}
-     ⚠️ num 必须是**数字**（≤8 字符），unit 是单位（≤10 字符）。
-        不要把文字标题塞进 num —— 那个位置只放得下一行 72pt 的数字。
-   选填 claim: [段落...]（≤3 段、每段 ≤40 字）
-        stats: [{"num":"38 家","label":"说明"}]，**2–3 个**，
-               num 同为短数字（≤8 字符），label ≤20 字
-        source
-
-3. definition —— 术语定义。适合解释一个概念/名词。
-   必填 term, formula（如 "= Define + Modify"）
-   选填 lead（一句加粗断言）, body, aside: [(文本,{})], source
-
-4. numbered_columns —— 分栏编号列表。适合并列的若干要点（4–9 条）。
-   必填 items: [{"name":"关键词","desc":"一句说明"}]
-   选填 columns（默认 3）, source
-
-5. quadrant —— 四象限，正好 4 条。适合四个并列维度/挑战。
-   必填 items: [{"name","desc"}] × 4
-   选填 source
-
-6. comparison_rows —— 维度对照（A 列 / B 列），2–5 行。适合前后对比、优劣对比。
-   必填 col_a, col_b, rows: [{"dim":"维度","a":"...","b":"..."}]
-   选填 source
-
-7. process_chain —— 横向流程链，3–5 步。适合操作步骤、实施路径。
-   必填 steps: [{"num":"01","name":"步骤名","desc":"两行短句，用 \\n 分隔"}]
-   选填 note: [(文本,{})], source
-
-8. timeline_vertical —— 纵向时间线，5–8 步。适合步骤较多、每条一句话的场景。
-   必填 steps: [{"name":"步骤名","desc":"一句说明"}]
-   选填 source
-
-9. node_flow —— 节点链，6–8 个节点，自动折返。适合工作流、系统流程。
-   必填 nodes: ["Start 收集信息", "生成标题", ...]
-   选填 note, source
-
-10. data_table —— 原生表格，2–8 行 × 2–5 列。适合参数对比、版本对比、类型矩阵。
-    必填 header: ["列1","列2"], rows: [[...], ...]
-    选填 col_widths（英寸，需合计 11.33）, source
-
-11. tinted_bands —— 通栏浅色带，2–4 条。适合场景分类、并列陈述。
-    必填 bands: [{"name":"名称","desc":"一到两句说明"}]
-    选填 source
-
-12. quote —— 引语页。适合结语、核心观点。一页只讲一件事。
-    必填 quote: [[(文本,{})], ...]
-    选填 kicker, attribution, body: [段落...], source
-"""
 
 DESIGN_RULES = """
 设计要求（必须遵守）：
@@ -86,10 +32,180 @@ DESIGN_RULES = """
 - 页面上的文字要**精炼**：正文段落每条不超过 60 字，列表项不超过 30 字。
   这是幻灯片，不是文档——把细节砍掉，留下最锋利的事实。
 - 数字、专有名词、结论句必须保留原文，不得改写或编造。
-- 同一版式不要连续出现在相邻两页；整份 deck 里每种版式最多用 3 次。
-- 第一页用 statement 或 stat_hero 开场；最后一页用 quote 收尾。
 - 每页都要给 source 字段（写来源标注，如 "Source: 《Dify 介绍与实战》§1.1"）。
+
+**版式只能从该页给出的候选里挑**（候选已经按这一页的表达意图与内容容量筛过）。
+候选里排在前面的更贴题。不要在候选之外自创版式名。
 """
+
+
+# ══════════════════════════════════════════════════════════════
+# 意图 → 候选版式
+#
+# 让模型从 20 个版式里盲选，是「大纲写『六参数对比表 + 三类调优技巧』、
+# 规划却选了 timeline_vertical」这类错配的温床。改成两步：先用**表达意图**与
+# **内容形态**把候选收窄到 2–4 个，再让模型在候选内选 —— 借鉴自 PPTAgent 的
+# layout_selector（它把版式按纯文本/多模态先二分，再在集合内让模型选）。
+# ══════════════════════════════════════════════════════════════
+
+# 无模型时按标题关键词猜意图。有模型时用大纲给的 intent。
+_INTENT_HINTS = (
+    ('status',       ('进展', '进度', '状态', '风险', '落实', '完成情况', '跟踪')),
+    ('summary',      ('总结', '结论', '要点回顾', '下一步', '结语', '落地要点', '小结')),
+    ('comparison',   ('对比', '对照', '优劣', '前后', '区别', '差异', '传统', 'vs')),
+    ('hierarchy',    ('分层', '架构', '技术栈', '层级', '体系', '中台', '金字塔')),
+    ('timeline',     ('阶段', '时间线', '演进', '里程碑', '历程', '迭代', '路线')),
+    ('process',      ('步骤', '流程', '如何', '怎么', '搭建', '做法', '操作')),
+    ('definition',   ('是什么', '什么是', '定义', '含义', '概念')),
+    ('quantitative', ('数据', '指标', '参数', '定价', '价格', '版本', '数字', '统计')),
+    ('enumeration',  ('要点', '并列', '清单', '列表', '亮点', '能力', '功能',
+                      '关键词', '措施', '理念', '要素')),
+)
+
+
+def guess_intent(page: dict, blocks: list[dict] | None = None) -> str:
+    """猜一页的表达意图。纯确定性 —— 兜底路径与 intent 缺失时都用它。"""
+    text = '%s %s' % (page.get('title') or '', page.get('hint') or '')
+    for intent, keys in _INTENT_HINTS:
+        if any(k in text for k in keys):
+            return intent
+    shape = layout_spec.shape_of(blocks or [])
+    if shape['has_table']:
+        return 'quantitative'
+    n = shape['n_items']
+    if n <= 2:
+        return 'statement'
+    return 'enumeration'
+
+
+def _content_index(doc: dict):
+    """返回 `content_of(page) -> [源块]`。锚点优先，标题精确匹配兜底。
+
+    取内容**优先走锚点**。锚点是源页标题 → 骨架里的块区间，比「标题精确字符串
+    匹配」稳得多：LLM 大纲给的是自创的主张式标题（如「七大价值：…」），永远
+    匹配不上任何 heading，于是每一页都退化成只有标题的 statement 页、且不报错。
+    锚点允许缺失或过期（人工编辑过大纲），取不到再退回标题匹配。
+    """
+    blocks_all = doc['blocks']
+    # 骨架缺失就现场重算 —— parsed.json 可能是加骨架之前写的旧文件，
+    # 也可能被人手改过。没有骨架时锚点查不到，整份 deck 会退化成
+    # 只有标题的空白页，而且**不报错**，所以这里不省这一步。
+    sk = doc.get('structure') or structure.build_skeleton(blocks_all)
+    spans = structure.page_index(sk)
+    by_title: dict[str, list] = {}
+    cur = None
+    for b in blocks_all:
+        if b['type'] == 'heading':
+            by_title[b['text']] = []
+            cur = b['text']
+        elif cur is not None:
+            by_title[cur].append(b)
+
+    def content_of(page: dict) -> list[dict]:
+        span = spans.get((page.get('anchor') or '').strip())
+        if span:
+            return [blocks_all[i] for i in range(span[0], span[1])
+                    if blocks_all[i]['type'] != 'heading']
+        return by_title.get(page.get('title'), [])
+
+    return content_of
+
+
+def _page_roles(pages: list[dict]) -> list[str]:
+    """整份 deck 的 page_role。结构性判断，不需要模型。
+
+    第一页是开场、最后一页是收尾，其余都是内容页 —— 章节隔断页由
+    `_add_dividers` 规则插入（结构页不该交给模型挑，它没有内容可依据）。
+    """
+    # 只有两档：结构页（隔断）与内容页。位置语义（开场/收尾）交给 intent，
+    # 不再单开一档 —— 那会让首尾页绕过意图过滤，候选塌成一个版式。
+    return ['section' if p.get('divider') else 'content' for p in pages]
+
+
+def page_candidates(page: dict, role: str, blocks: list[dict] | None) -> list[str]:
+    """一页的候选版式名（已按意图与容量筛过），最多 4 个。"""
+    intent = page.get('intent') or guess_intent(page, blocks)
+    shape = layout_spec.shape_of(blocks or [])
+    got = layout_spec.candidates(role, intent, shape)
+    if not got:
+        sp = layout_spec.resolve(None, role, intent, shape)
+        return [sp.name]
+    return [sp.name for sp in got[:4]]
+
+
+# 每个版式的「条目列表」在 spec 的哪个字段、条目文本要从哪些子字段拼。
+# 用来校验**模型写出来的成品**是否超容量 —— 这是 `_fit()` 静默截断的事前防线：
+# 实测 node_flow 8 个节点里 6 个被截成「小红书正文 · 爆款写作…」，而几何报告全绿。
+_ITEM_FIELDS = {
+    'numbered_columns':   ('items', ('name', 'desc')),
+    'tinted_bands':       ('bands', ('name', 'desc')),
+    'quadrant':           ('items', ('name', 'desc')),
+    'split_main_aside':   ('items', ('name', 'desc')),
+    'comparison_rows':    ('rows', ('dim', 'a', 'b')),
+    'process_chain':      ('steps', ('name', 'desc')),
+    'timeline_vertical':  ('steps', ('name', 'desc')),
+    'node_flow':          ('nodes', ()),
+    # 阶段名与**节点标签**都要量：真正会被 `_fit()` 截断的是节点标签，不是阶段名
+    'phase_grouped_flow': ('phases', ('name', 'nodes')),
+    'layered_stack':      ('layers', ('name', 'modules')),
+    'kpi_grid':           ('items', ('label', 'note')),
+    'progress_checklist': ('items', ('name', 'desc')),
+    'executive_summary':  ('points', ('text',)),
+    'data_table':         ('rows', ()),
+    'stat_hero':          ('stats', ('label',)),
+}
+
+
+def _items(sl: dict) -> tuple[int, list[str]]:
+    """一页 spec 的 (条目数, 各条目的文本)。
+
+    **条目数** = 列表里有几项（kpi_grid 的 6 个指标是 6 条，不是 12 条）；
+    **条目文本** = 该项各标量子字段拼起来算一条，嵌套列表（层内的模块名、
+    组内的节点标签）则每个元素各算一条 —— 它们各自是独立的单行文本，
+    也各自会被 `_fit()` 截断。
+    """
+    rule = _ITEM_FIELDS.get(sl.get('layout') or '')
+    if not rule:
+        return 0, []
+    key, subs = rule
+    got = sl.get(key)
+    if not isinstance(got, list):
+        return 0, []
+    texts: list[str] = []
+    for it in got:
+        if isinstance(it, str):
+            texts.append(it)
+        elif isinstance(it, dict):
+            joined = ''
+            for s in subs:
+                v = it.get(s)
+                if isinstance(v, (list, tuple)):
+                    texts.extend(str(x) for x in v)
+                else:
+                    joined += str(v or '')
+            if joined:
+                texts.append(joined)
+        elif isinstance(it, (list, tuple)):
+            texts.extend(str(c) for c in it)
+    return len(got), [t for t in texts if t]
+
+
+def overflow_reason(sl: dict) -> str:
+    """模型写出来的这一页有没有超容量。返回原因（空串 = 没超）。"""
+    sp = layout_spec.get(sl.get('layout') or '')
+    if sp is None:
+        return ''
+    count, texts = _items(sl)
+    if not texts:
+        return ''
+    if sp.max_items is not None and count > sp.max_items:
+        return '条目 %d 条，超过上限 %d 条' % (count, sp.max_items)
+    hard = sp.hard_item_chars
+    if hard:
+        over = [t for t in texts if len(t) > hard]
+        if over:
+            return '单条 %d 字，超过上限 %d 字（%s…）' % (len(over[0]), hard, over[0][:16])
+    return ''
 
 
 # ══════════════════════════════════════════════════════════════
@@ -108,11 +224,17 @@ def make_outline(doc: dict, on_log=None) -> dict:
     """
     log = on_log or print
     lo, hi = config.page_range()
+    # 先决定要不要留出章节分隔页 —— 它是结构页，要占页数预算，所以必须**先**扣掉，
+    # 而不是等正文按 hi 生成完了再硬塞进去（那样总页数会超标）。
+    n_div, lo, hi = _divider_budget(doc, lo, hi)
+    if n_div:
+        log('[outline] 预留 %d 页给章节分隔页，正文按 %d–%d 页控制' % (n_div, lo, hi))
     src = _source_text(doc)
     cfg = config.llm_config()
     if cfg is not None:
         try:
             out = _outline_by_llm(doc, src, lo, hi, cfg, log)
+            out = _add_dividers(out, doc, log)
             out['_meta'] = dict(generated_by='llm', model=cfg.model,
                                 warnings=out.pop('_warnings', []))
             return out
@@ -123,14 +245,75 @@ def make_outline(doc: dict, on_log=None) -> dict:
             warn = '%s: %s' % (type(e).__name__, e)
             log('[outline] 模型调用失败，退回确定性大纲：%s' % e)
             out = _outline_fallback(doc, lo, hi)
+            out = _add_dividers(out, doc, log)
             out['_meta'] = dict(generated_by='fallback', model=cfg.model,
                                 warnings=[warn])
             return out
     out = _outline_fallback(doc, lo, hi)
+    out = _add_dividers(out, doc, log)
     out['_meta'] = dict(generated_by='fallback', model=None,
                         warnings=['未配置文本模型（PPTGEN_LLM_*），'
                                   '大纲走确定性兜底，未经过模型提炼'])
     return out
+
+
+# ══════════════════════════════════════════════════════════════
+# 章节分隔页
+# ══════════════════════════════════════════════════════════════
+def _divider_budget(doc: dict, lo: int, hi: int) -> tuple[int, int, int]:
+    """决定插不插章节分隔页，返回 (分隔页数, 正文页下限, 正文页上限)。
+
+    判据是「扣掉分隔页后，每章至少还留得下一页正文」。装不下就**完全不插**，
+    而不是硬塞或砍正文 —— 正文是内容，结构是锦上添花。
+
+    关掉：`.env` 里设 `PPTGEN_SECTION_DIVIDERS=0`。
+    """
+    if not config.section_dividers():
+        return 0, lo, hi
+    chapters = (doc.get('structure') or {}).get('chapters') or []
+    n = len(chapters)
+    if n < 2 or hi < n * 2:
+        return 0, lo, hi
+    return n, min(lo, hi - n), hi - n
+
+
+def _add_dividers(outline: dict, doc: dict, log=print) -> dict:
+    """给每章开头插一页章节隔断。
+
+    **规则插入而不是让模型挑**：隔断页是结构页，它没有内容可依据 ——
+    让模型在 20 个版式里「选」一个结构页，只会选错。借鉴 PPTAgent 的
+    `_add_functional_layouts()`：功能性版式按位置规则插入，不参与内容驱动的选择。
+    """
+    if not config.section_dividers():
+        return outline
+    chapters = (doc.get('structure') or {}).get('chapters') or []
+    sections = outline.get('sections') or []
+    if len(chapters) < 2 or len(chapters) != len(sections):
+        return outline
+    n = 0
+    for i, (s, c) in enumerate(zip(sections, chapters)):
+        name = (s.get('name') or c.get('name') or '').strip()
+        m = re.match(r'^\s*(\d{1,2})', name)
+        pages = s.setdefault('pages', [])
+        pages.insert(0, dict(
+            title=name,
+            hint='章节隔断页',
+            intent='section',
+            source='',
+            anchor='',
+            divider=True,
+            num=(m.group(1) if m else '%02d' % (i + 1)),
+            # 章节的 summary 正好当隔断页那句导语
+            lead=(s.get('summary') or '')[:40],
+        ))
+        n += 1
+    outline['divider_count'] = n
+    outline['page_count'] = sum(1 for s in sections for p in s['pages']
+                                if not p.get('divider'))
+    outline['total_pages'] = outline['page_count'] + n
+    if log:
+        log('[outline] 已插入 %d 页章节分隔页（总页数 %d）' % (n, outline['total_pages']))
+    return outline
 
 
 # 单次调用能塞下的正文上限。超过就按章分片 —— 分片是**为长文档准备的**，
@@ -145,10 +328,29 @@ _HEAD_TAIL = """
   "title": "整份 PPT 的标题",
   "sections": [
     {"name": "01 章节名", "summary": "一句话概括",
-      "pages": [{"title": "页面标题", "hint": "展示形态",
+      "pages": [{"title": "页面标题", "hint": "展示形态", "intent": "表达意图",
                  "source": "来源标注", "anchor": "该页内容主要来自的源页标题"}]}
   ]
 }
+"""
+
+# 每页的 `intent` 决定后面能挑哪些版式 —— 它是「这页在表达什么」，
+# 与 `hint`（自由描述的展示形态）不同，必须是**固定枚举里的一个**，
+# 否则下游无法把它映射到候选版式集。
+_INTENT_BLOCK = """
+每页的 `intent` 必须从下面这些值里**原样选一个**（不要自创、不要写中文）：
+
+  statement     单点主张 —— 一句话结论或判断
+  definition    概念解释 —— 术语 + 释义
+  enumeration   并列列举 —— 若干同级要点
+  comparison    对照 —— A/B 两方、优劣、前后
+  process       步骤流程 —— 有先后的动作、操作路径
+  timeline      时间推进 —— 阶段、里程碑、演进
+  hierarchy     层级包含 —— 分层、支撑、嵌套（技术栈、架构、体系）
+  quantitative  数据指标 —— 数字、指标、参数、表格
+  status        状态进度 —— 已完成 / 进行中 / 有风险 / 待启动
+  summary       结论回收 —— 把要点收成几条可念的结论
+  quote         引语 —— 一句被引用的话
 """
 
 
@@ -235,6 +437,13 @@ def _outline_problems(data: dict, sk: dict, lo: int, hi: int) -> list[str]:
         problems.append('%d 页缺 hint 或 source（例：%s）'
                         % (len(missing), missing[0]))
 
+    # intent 是版式选择的输入：缺了就退化成按标题猜，选出来的版式自然不贴内容。
+    bad_intent = [p.get('title') for p in pages
+                  if (p.get('intent') or '') not in layout_spec.INTENTS]
+    if bad_intent:
+        problems.append('%d 页缺 intent 或不在枚举内（例：%s）'
+                        % (len(bad_intent), bad_intent[0]))
+
     bad = []
     seen = set()
     for p in pages:
@@ -288,6 +497,10 @@ def _repair_outline(data: dict, sk: dict, lo: int, hi: int,
                 p['source'] = 'Source: 《%s》%s' % (data.get('title') or '', s.get('name', ''))
             if not (p.get('anchor') or '').strip() and spans:
                 p['anchor'] = spans[min(j, len(spans) - 1)]
+            # intent 缺失会让版式选择退化成「按标题猜」，这里先按标题/形态补一个，
+            # 规划阶段还会用真实源块重算（见 page_candidates）。
+            if (p.get('intent') or '') not in layout_spec.INTENTS:
+                p['intent'] = guess_intent(p)
 
     # ③ 页数超限：保章压页
     sections = _compress_sections(sections, hi)
@@ -320,7 +533,7 @@ def _outline_oneshot(doc, src, lo, hi, cfg, sk, feedback=None) -> dict:
 - 每页标注最适合的展示形态 hint（如「对比表」「流程图」「三个并列要点」「一个核心数字」）。
 - 每页给 source（来源标注），并给 anchor：填它主要取材的那条源页标题（照抄上面的）。
 - {_mode_hint()}
-{fix}{_HEAD_TAIL}"""
+{_INTENT_BLOCK}{fix}{_HEAD_TAIL}"""
     return llm.ask_json(prompt, cfg, system=_SYSTEM,
                         max_tokens=config.outline_max_tokens())
 
@@ -362,10 +575,10 @@ def _outline_chunked(doc, sk, lo, hi, cfg) -> dict:
 - 每页给一个具体的、有信息量的标题（≤24 字），不要「概述」「简介」这类空标题。
 - 每页标注展示形态 hint、来源 source，以及 anchor（照抄本章源页标题里最相关的一条）。
 - 数字、专有名词、结论句必须原样保留。
-
+{_INTENT_BLOCK}
 只输出 JSON：
 {{"name": "{c['name']}", "summary": "本章一句话概括",
-  "pages": [{{"title": "…", "hint": "…", "source": "…", "anchor": "…"}}]}}
+  "pages": [{{"title": "…", "hint": "…", "intent": "…", "source": "…", "anchor": "…"}}]}}
 """
         data = llm.ask_json(prompt, cfg, system=_SYSTEM,
                             max_tokens=config.outline_max_tokens())
@@ -413,11 +626,19 @@ def _outline_fallback(doc: dict, lo: int, hi: int) -> dict:
     """
     sk = doc.get('structure') or {}
     chapters = [c for c in (sk.get('chapters') or []) if c.get('pages')]
+    content_of = _content_index(doc)
 
     sections = []
     for c in chapters:
-        pages = [dict(title=p['name'], hint='', source='')
-                 for p in c['pages'] if not _NOT_A_TITLE.match(p['name'].strip())]
+        pages = []
+        for p in c['pages']:
+            if _NOT_A_TITLE.match(p['name'].strip()):
+                continue
+            page = dict(title=p['name'], hint='', source='', anchor=p['name'])
+            # 兜底路径没有模型给的 intent，就按**真实源块**的形态猜一个 ——
+            # 有块可比对，比只看标题准得多（9 条要点的页不该猜成「单点主张」）。
+            page['intent'] = guess_intent(page, content_of(page))
+            pages.append(page)
         if pages:
             sections.append(dict(name=c['name'], summary='', pages=pages))
 
@@ -434,7 +655,9 @@ def _outline_fallback(doc: dict, lo: int, hi: int) -> dict:
             titles.append(t)
         titles = titles or [doc.get('title') or doc['source']]
         sections = [dict(name=doc.get('title') or doc['source'], summary='',
-                         pages=[dict(title=t, hint='', source='') for t in titles])]
+                         pages=[dict(title=t, hint='', source='',
+                                     intent=guess_intent(dict(title=t)))
+                                for t in titles])]
 
     sections = _compress_sections(sections, hi)
     return _normalise_outline(
@@ -512,6 +735,14 @@ def _normalise_outline(data: dict, doc: dict, lo: int, hi: int) -> dict:
             item.update(name=s.get('name') or '未命名章节',
                         summary=s.get('summary') or '', pages=pages)
             clean.append(item)
+    # intent 是版式选择的输入，必须每页都有。模型漏了或写了枚举外的值，
+    # 就在这里按标题/形态补一个，而不是让它留空、导致下游退化成盲选。
+    if clean:
+        content_of = _content_index(doc)
+        for s in clean:
+            for p in s['pages']:
+                if (p.get('intent') or '') not in layout_spec.INTENTS:
+                    p['intent'] = guess_intent(p, content_of(p))
     if not clean:
         raise ValueError('大纲为空')
     if not data.get('toc'):
@@ -536,8 +767,11 @@ def outline_preview(outline: dict) -> str:
         L.append('> 结构能跑完，但内容取舍、标题主张、版式与语义的匹配都未生效，'
                  '产出会明显单调。')
         L.append('')
-    L += ['正文页数：%d（目标 %d–%d）'
-          % (outline.get('page_count', 0), *(outline.get('_page_range') or [0, 0])),
+    n_div = outline.get('divider_count', 0)
+    L += ['正文页数：%d（目标 %d–%d）%s'
+          % (outline.get('page_count', 0), *(outline.get('_page_range') or [0, 0]),
+             '　+ %d 页章节分隔页，合计 %d 页'
+             % (n_div, outline.get('total_pages', 0)) if n_div else ''),
           '']
     n = 0
     for s in outline['sections']:
@@ -546,9 +780,20 @@ def outline_preview(outline: dict) -> str:
             L.append('> %s' % s['summary'])
         for p in s['pages']:
             n += 1
-            hint = ('  〔%s〕' % p['hint']) if p.get('hint') else ''
-            L.append('%2d. %s%s' % (n, p['title'], hint))
+            if p.get('divider'):
+                L.append('%2d. 〔章节分隔页〕%s' % (n, p['title']))
+                continue
+            bits = []
+            if p.get('intent'):
+                bits.append(p['intent'])
+            if p.get('hint'):
+                bits.append(p['hint'])
+            tag = ('  〔%s〕' % ' · '.join(bits)) if bits else ''
+            L.append('%2d. %s%s' % (n, p['title'], tag))
         L.append('')
+    L += ['', '> `intent` 决定这一页能挑哪些版式（见 layout_spec.INTENTS）；'
+              '手动改它就能改版式走向。',
+          '> 章节分隔页由 `PPTGEN_SECTION_DIVIDERS=0` 关闭。']
     return '\n'.join(L)
 
 
@@ -561,7 +806,7 @@ def make_plan(outline: dict, doc: dict, on_log=None) -> dict:
     src = _source_text(doc)
     if cfg is not None:
         try:
-            plan = _plan_by_llm(outline, src, cfg, log)
+            plan = _plan_by_llm(outline, doc, src, cfg, log)
             # plan 以前**没有任何「走没走模型」的标记**（outline 有 `_meta`），
             # 所以事后无法回答「这次规划是不是退回兜底生成的」。挂在 **plan 字典**
             # 上而不是单个 slide 上 —— 逐 slide 的字段会被 repair 的 `_text_len`
@@ -580,41 +825,116 @@ def make_plan(outline: dict, doc: dict, on_log=None) -> dict:
 PLAN_BATCH = 6
 
 
-def _plan_by_llm(outline: dict, src: str, cfg, log) -> dict:
-    pages = []
-    for s in outline['sections']:
-        for p in s['pages']:
-            # `anchor` 一定要带上：它是「这页的内容在源文档的哪一段」，
-            # 白名单少一个字段，规划模型就只能瞎猜取材范围。
-            pages.append({'section': s['name'], 'title': p['title'],
-                          'hint': p.get('hint', ''), 'source': p.get('source', ''),
-                          'anchor': p.get('anchor', '')})
-    slides, used = [], {}
-    for i in range(0, len(pages), PLAN_BATCH):
-        chunk = pages[i:i + PLAN_BATCH]
-        log('[plan] 规划第 %d–%d 页（共 %d）…'
-            % (i + 1, i + len(chunk), len(pages)))
-        got = _plan_batch(chunk, src, cfg, used, len(pages))
-        for sl in got:
+def _divider_slide(page: dict, section: str) -> dict:
+    """章节隔断页的 spec —— 结构固定，不经过模型。"""
+    return dict(layout='section_divider',
+                num=str(page.get('num') or '01'),
+                title=page.get('title') or section,
+                lead=page.get('lead') or '',
+                source='')
+
+
+def _plan_by_llm(outline: dict, doc: dict, src: str, cfg, log) -> dict:
+    """逐页：算意图与内容形态 → 收窄候选 → 模型在候选内选 → 过一致性护栏。
+
+    与早先「把版式目录整个丢给模型盲选」的区别在于，模型看到的每一页都带着
+    **这一页的候选集**（按表达意图与容量筛过），于是「大纲写『六参数对比表』、
+    规划却选了 timeline_vertical」这类错配从源头被掐掉。
+    """
+    flat = [(s['name'], p) for s in outline['sections'] for p in s['pages']]
+    roles = _page_roles([p for _, p in flat])
+    content_of = _content_index(doc)
+
+    by_index: dict[int, dict] = {}
+    todo: list[tuple[int, dict, dict]] = []       # (下标, 送模型的页, 护栏元信息)
+    for i, ((sec, p), role) in enumerate(zip(flat, roles)):
+        if p.get('divider'):
+            by_index[i] = _divider_slide(p, sec)
+            continue
+        blocks = content_of(p)
+        cands = page_candidates(p, role, blocks)
+        intent = p.get('intent') or guess_intent(p, blocks)
+        # `anchor` 一定要带上：它是「这页的内容在源文档的哪一段」，
+        # 白名单少一个字段，规划模型就只能瞎猜取材范围。
+        todo.append((i, {'section': sec, 'title': p['title'],
+                         'hint': p.get('hint', ''), 'intent': intent,
+                         'source': p.get('source', ''), 'anchor': p.get('anchor', ''),
+                         'candidates': cands},
+                     dict(role=role, intent=intent, candidates=cands,
+                          page=p, section=sec, blocks=blocks)))
+
+    used: dict[str, int] = {}
+    off_candidate = 0
+    for k in range(0, len(todo), PLAN_BATCH):
+        chunk = todo[k:k + PLAN_BATCH]
+        log('[plan] 规划第 %d–%d 页（共 %d）…' % (k + 1, k + len(chunk), len(todo)))
+        got = _plan_batch([c[1] for c in chunk], src, cfg, used, len(todo))
+        for n, (i, _payload, meta) in enumerate(chunk):
+            sl = got[n] if n < len(got) else None
+            if not isinstance(sl, dict):
+                sl = None
+            elif sl.get('layout') not in meta['candidates']:
+                # 模型挑了候选外的版式。**不能只把 layout 名改掉** ——
+                # 字段是照着另一个版式填的，改名会缺键、渲染时才炸。
+                # 这一页改用确定性生成（字段必然对得上）。
+                log('[plan] 第 %d 页选了候选外的版式 %r，本页改用确定性生成'
+                    % (i + 1, sl.get('layout')))
+                off_candidate += 1
+                sl = None
+            else:
+                why = overflow_reason(sl)
+                if why:
+                    # 条目超容量 → 再渲染就会被 `_fit()` 静默截成残句。
+                    # 这一页改用确定性生成，让内容按版式真正的容量重排。
+                    log('[plan] 第 %d 页（%s）%s，本页改用确定性生成'
+                        % (i + 1, sl.get('layout'), why))
+                    off_candidate += 1
+                    sl = None
+            if sl is None:
+                sl = _heuristic_slide(meta['page'], meta['section'], meta['blocks'],
+                                      candidates=meta['candidates'], taken=used)
             used[sl.get('layout')] = used.get(sl.get('layout'), 0) + 1
-        slides.extend(got)
-    if not slides:
+            by_index[i] = sl
+
+    if not by_index:
         raise ValueError('规划结果为空')
-    return _normalise_plan(slides, outline, log)
+
+    # 护栏要在**全部批次都回来之后**跑：相邻判断跨批，批内看不出跨批的重复。
+    order = sorted(by_index)
+    metas = {i: m for i, _p, m in todo}
+    prev = None
+    for i in order:
+        sl = by_index[i]
+        if sl.get('layout') == prev and sl.get('layout') != 'section_divider':
+            meta = metas.get(i)
+            rest = _diversity_alternatives((meta or {}).get('candidates'), prev)
+            if meta is not None and rest:
+                log('[plan] 第 %d 页与上一页同为 %s，改用 %s' % (i + 1, prev, rest[0]))
+                by_index[i] = _heuristic_slide(
+                    meta['page'], meta['section'], meta['blocks'],
+                    candidates=rest, taken=used)
+        prev = by_index[i].get('layout')
+
+    slides = [by_index[i] for i in order]
+    plan = _normalise_plan(slides, outline, log)
+    if off_candidate:
+        plan['_warnings'] = ['%d 页的版式不在候选集内，已改用确定性生成'
+                             % off_candidate]
+    return plan
 
 
 def _plan_batch(chunk: list[dict], src: str, cfg, used: dict, total: int) -> list[dict]:
-    used_txt = ('已用过的版式及次数：%s（尽量不要再堆同一种）'
+    used_txt = ('已用过的版式及次数：%s（不要再堆同一种）'
                 % (used or '无')) if used else '这是第一批。'
     prompt = f"""你在把一份大纲落成具体的幻灯片。整份共 {total} 页，本批需要处理 {len(chunk)} 页。
 
-{LAYOUT_CATALOG}
+{layout_catalog()}
 
 {DESIGN_RULES}
 
 {used_txt}
 
-本批要处理的大纲页：
+本批要处理的大纲页（每页的 `candidates` 是**这一页可以用的版式**）：
 {json.dumps(chunk, ensure_ascii=False, indent=1)}
 
 源文档内容（供你取用具体事实、数字与原文表述）：
@@ -623,11 +943,11 @@ def _plan_batch(chunk: list[dict], src: str, cfg, used: dict, total: int) -> lis
 </document>
 
 请为上面**每一页**各产出一个幻灯片定义，**顺序与给定顺序一致**。要求：
-- 严格按上面 12 种版式的字段填写，不要自创字段。
-- 每页的 layout 必须来自那 12 个名字。
-- **严格遵守每个版式的容量上限**（如 stat_hero 的 stats 只放 2–3 条、
-  num 必须是短数字；numbered_columns 每条 desc ≤22 字）。
-- 内容必须来自源文档，不得编造数字或事实。
+- 每页的 `layout` 必须从**该页 candidates 里的名字**中选，不许用别的版式。
+  候选按贴合度排列，排在前面的更贴题。
+- 严格按该版式的字段填写，不要自创字段。
+- **严格遵守该版式的容量上限**（目录里逐条写明了条数与字数）。
+- 内容必须来自源文档，不得编造数字或事实；图表的数据点必须是原文里有的。
 - 每页都要有 source 字段。
 
 只输出 JSON：
@@ -647,32 +967,25 @@ def _plan_fallback(outline: dict, doc: dict, log=None) -> dict:
     永远匹配不上任何 heading，于是每一页都退化成只有标题的 statement 页、
     且不报错。锚点允许缺失或过期（人工编辑过大纲），取不到再退回标题匹配。
     """
-    blocks_all = doc['blocks']
-    # 骨架缺失就现场重算 —— parsed.json 可能是加骨架之前写的旧文件，
-    # 也可能被人手改过。没有骨架时锚点查不到，整份 deck 会退化成
-    # 只有标题的空白页，而且**不报错**，所以这里不省这一步。
-    sk = doc.get('structure') or structure.build_skeleton(blocks_all)
-    spans = structure.page_index(sk)
-    by_title = {}
-    for b in blocks_all:
-        if b['type'] == 'heading':
-            by_title[b['text']] = []
-            cur = b['text']
-        elif by_title:
-            by_title[cur].append(b)
+    flat = [(s['name'], p) for s in outline['sections'] for p in s['pages']]
+    roles = _page_roles([p for _, p in flat])
+    content_of = _content_index(doc)
 
-    def content_of(page: dict) -> list[dict]:
-        span = spans.get((page.get('anchor') or '').strip())
-        if span:
-            return [blocks_all[i] for i in range(span[0], span[1])
-                    if blocks_all[i]['type'] != 'heading']
-        return by_title.get(page['title'], [])
-
-    slides, i = [], 0
-    for s in outline['sections']:
-        for p in s['pages']:
-            slides.append(_heuristic_slide(p, s['name'], content_of(p), rotate=i))
-            i += 1
+    slides, taken, prev = [], {}, None
+    for (sec, p), role in zip(flat, roles):
+        if p.get('divider'):
+            slides.append(_divider_slide(p, sec))
+            prev = 'section_divider'
+            continue
+        blocks = content_of(p)
+        cands = page_candidates(p, role, blocks)
+        # 相邻页不得同版式 —— 这条规则与 LLM 路径共用，兜底路径同样受约束
+        if prev in cands:
+            cands = _diversity_alternatives(cands, prev)
+        sl = _heuristic_slide(p, sec, blocks, candidates=cands, taken=taken)
+        taken[sl['layout']] = taken.get(sl['layout'], 0) + 1
+        prev = sl['layout']
+        slides.append(sl)
     return _normalise_plan(slides, outline, log)
 
 
@@ -688,49 +1001,126 @@ def _split_item(t: str) -> tuple[str, str]:
     return (t[:12], t[12:].strip()) if len(t) > 14 else (t, '')
 
 
-def _heuristic_slide(page: dict, section: str, blocks: list[dict],
-                     rotate: int = 0) -> dict:
-    """无模型时的版式选择。
+# 无模型时**能确定性构造**的版式。别的版式需要模型才有的信息（状态、层级名、
+# 图表的序列值、总纲句……），硬凑出来就是编造 —— 宁可不用，也不能编数字。
+_BUILDABLE = ('data_table', 'quadrant', 'numbered_columns', 'tinted_bands',
+              'split_main_aside', 'process_chain', 'timeline_vertical',
+              'node_flow', 'statement')
 
-    这一层**注定只是兜底**：内容的取舍、标题的主张、版式与语义的匹配
-    都依赖模型。这里只保证「有内容、版式不单调、一定能渲染」。
+# 条目可以**裁剪**的版式（多出来的条目去掉、排版仍然成立）。候选集用光时
+# 从这几个里借一个来避开相邻重复 —— 裁掉两条，也好过连着三页同一种构图。
+_TRIM_FRIENDLY = ('tinted_bands', 'split_main_aside', 'numbered_columns',
+                  'timeline_vertical')
+
+
+def _diversity_alternatives(cands: list[str], prev: str) -> list[str]:
+    """相邻去重时能换成什么。候选里还有别的就用别的；用光了才借可裁剪的版式。"""
+    rest = [c for c in (cands or []) if c != prev]
+    if rest:
+        return rest
+    return [c for c in _TRIM_FRIENDLY if c != prev]
+
+_STEP_RE = re.compile(
+    r'^\s*(?:\d{1,2}\s*[、.．)）]|第[一二三四五六七八九十]+步|首先|然后|接着|最后'
+    r'|step\s*\d)', re.I)
+
+
+def _looks_like_steps(items: list[str]) -> bool:
+    """这些条目看起来是**有序步骤**吗（而不是并列要点）。"""
+    hits = sum(1 for i in items if _STEP_RE.match(i))
+    return hits >= max(2, len(items) // 2)
+
+
+def _heuristic_slide(page: dict, section: str, blocks: list[dict], *,
+                     candidates: list[str] | None = None,
+                     taken: dict | None = None) -> dict:
+    """确定性版式选择：无模型时用它，模型给了候选外版式的那一页也用它。
+
+    这一层**注定只是兜底** —— 内容的取舍与标题的主张都依赖模型。它只保证四件事：
+    有内容、版式不与相邻页重复、**字段与版式一定对得上**、一定能渲染。
+
+    `candidates` 是已按意图与容量筛过的候选集（见 `page_candidates`），
+    `taken` 是用过的版式计数 —— 在候选里优先挑没用过的，避免整份 deck
+    退化成同一个版式（这正是「18 页里 12 页同一种版式」的成因）。
     """
     paras = [b['text'] for b in blocks if b['type'] == 'para']
     bullets = [i for b in blocks if b['type'] == 'bullets' for i in b['items']]
     tables = [b for b in blocks if b['type'] == 'table']
     src = page.get('source') or ('Source: %s' % section)
     base = dict(kicker=section, source=src)
+    title = page.get('title') or section
+    tbl = tables[0] if tables else None
 
-    if tables:
-        t = tables[0]
-        return dict(layout='data_table', title=page['title'],
-                    header=t['header'], rows=t['rows'], **base)
+    allowed = [c for c in (candidates or _BUILDABLE) if c in _BUILDABLE] or ['statement']
+    used = taken or {}
 
-    items = bullets or paras
+    def pick(*order) -> str:
+        pool = [c for c in order if c in allowed] or allowed
+        fresh = [c for c in pool if not used.get(c)]
+        return (fresh or pool)[0]
+
+    items = [i.strip() for i in (bullets or paras) if (i or '').strip()]
     n = len(items)
+    # node_flow 的节点框只有 2.30" 宽，13pt 单行约 12 字。源条目更长时把它排除 ——
+    # 兜底路径没有模型来压文案，硬用只会被 `_fit()` 截成残句。
+    if items and max(len(i) for i in items) > 13:
+        allowed = [c for c in allowed if c != 'node_flow'] or ['statement']
+
     if n == 0:
-        return dict(layout='statement', lines=[[(page['title'], {'hl': True})]], **base)
-    if n <= 2:
-        return dict(layout='statement', lines=[[(page['title'], {})]],
-                    body=[[(p, {'size': 16, 'color': 'MUTED'})] for p in items], **base)
-    if n == 4 and all(len(i) <= 26 for i in items):
-        return dict(layout='quadrant',
-                    items=[dict(name=a, desc=b) for a, b in map(_split_item, items)],
-                    **base)
-    if 3 <= n <= 5 and rotate % 3 == 2:
-        return dict(layout='tinted_bands',
-                    bands=[dict(name=a, desc=b) for a, b in map(_split_item, items)],
-                    **base)
-    if 3 <= n <= 9:
-        return dict(layout='numbered_columns',
-                    items=[dict(name=a, desc=b) for a, b in map(_split_item, items)],
-                    **base)
-    # 超过 9 条：轮换用色带 / 大数字，避免整份都是同一种版式
-    if rotate % 2 == 0:
-        return dict(layout='tinted_bands',
-                    bands=[dict(name=a, desc=b) for a, b in
-                           map(_split_item, items[:4])], **base)
-    return dict(layout='statement', lines=[[(page['title'], {})]],
+        return dict(layout='statement',
+                    lines=[[(title, {'hl': True})]], **base)
+
+    if tbl and n <= 5 and 'split_main_aside' in allowed:
+        want = 'split_main_aside'          # 有表又有要点 —— 一页讲两件事
+    elif tbl and 'data_table' in allowed:
+        want = 'data_table'
+    elif n <= 2:
+        want = pick('statement')
+    elif n == 4 and 'quadrant' in allowed:
+        want = pick('quadrant', 'numbered_columns', 'tinted_bands')
+    elif 3 <= n <= 5 and 'process_chain' in allowed and _looks_like_steps(items):
+        want = pick('process_chain', 'numbered_columns')
+    elif n <= 9:
+        want = pick('numbered_columns', 'tinted_bands', 'split_main_aside')
+    else:
+        want = pick('timeline_vertical', 'numbered_columns', 'tinted_bands')
+
+    if want == 'data_table':
+        return dict(layout='data_table', title=title, header=tbl['header'],
+                    rows=tbl['rows'][:8], **base)
+    if want == 'split_main_aside':
+        spec = dict(layout='split_main_aside', title=title,
+                    items=[dict(name=a, desc=b)
+                           for a, b in map(_split_item, items[:5])], **base)
+        if tbl:
+            spec['aside_table'] = dict(header=tbl['header'], rows=tbl['rows'][:4])
+        return spec
+    if want == 'quadrant':
+        return dict(layout='quadrant', title=title,
+                    items=[dict(name=a, desc=b)
+                           for a, b in map(_split_item, items[:4])], **base)
+    if want == 'process_chain':
+        steps = []
+        for k, it in enumerate(items[:5], 1):
+            nm, ds = _split_item(it)
+            steps.append(dict(num='%02d' % k, name=nm, desc=ds))
+        return dict(layout='process_chain', title=title, steps=steps, **base)
+    if want == 'timeline_vertical':
+        return dict(layout='timeline_vertical', title=title,
+                    steps=[dict(name=a, desc=b)
+                           for a, b in map(_split_item, items[:8])], **base)
+    if want == 'node_flow':
+        return dict(layout='node_flow', title=title,
+                    nodes=[i[:13] for i in items[:8]], **base)
+    if want == 'tinted_bands':
+        return dict(layout='tinted_bands', title=title,
+                    bands=[dict(name=a, desc=b)
+                           for a, b in map(_split_item, items[:4])], **base)
+    if want == 'numbered_columns':
+        return dict(layout='numbered_columns', title=title, columns=3,
+                    items=[dict(name=a, desc=b)
+                           for a, b in map(_split_item, items[:9])], **base)
+    return dict(layout='statement', lines=[[(title, {})]],
                 body=[[(p, {'size': 16, 'color': 'MUTED'})] for p in items[:3]], **base)
 
 
@@ -766,7 +1156,11 @@ def _normalise_plan(slides: list[dict], outline: dict, log=None) -> dict:
             sl.pop('title', None)
         elif not (sl.get('title') or '').strip():
             sl['title'] = (page.get('title') or '').strip()
-        if not (sl.get('kicker') or '').strip() and i - 1 < len(sections):
+        # 章节隔断页不给 kicker：它自己就是章节名，再补一行小字到左上角
+        # 等于把同一个名字写两遍。
+        if (sl['layout'] != 'section_divider'
+                and not (sl.get('kicker') or '').strip()
+                and i - 1 < len(sections)):
             sl['kicker'] = sections[i - 1]
         clean.append(sl)
     return dict(slides=clean, toc=list(outline.get('toc') or []),

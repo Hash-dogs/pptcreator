@@ -14,28 +14,17 @@
 """
 from __future__ import annotations
 
-from . import config, llm
+from . import config, layout_spec, llm
 from .layouts import LAYOUT_NAMES
 
 # 每个版式大致能装多少字。给模型一个明确的预算，比让它猜有效得多。
-LAYOUT_CAPACITY = {
-    'statement':      'lines 每行 ≤ 22 字，最多 2 行；body 最多 3 段、每段 ≤ 60 字。',
-    'stat_hero':      'hero.num ≤ 8 字符；claim 最多 3 段、每段 ≤ 40 字；'
-                      'stats 每条 label ≤ 22 字。',
-    'definition':     'term ≤ 10 字；formula ≤ 26 字符；lead ≤ 24 字；'
-                      'body ≤ 110 字；aside ≤ 30 字。',
-    'numbered_columns': '每条 name ≤ 8 字、desc ≤ 22 字；最多 9 条。',
-    'quadrant':       '每条 name ≤ 10 字、desc ≤ 46 字；正好 4 条。',
-    'comparison_rows': '每行 dim ≤ 6 字、a 与 b 各 ≤ 34 字；最多 4 行。',
-    'process_chain':  '每步 name ≤ 7 字、desc 两行、每行 ≤ 7 字；最多 5 步；'
-                      'note ≤ 40 字。',
-    'timeline_vertical': '每条 name ≤ 8 字、desc ≤ 22 字；最多 8 条。',
-    'node_flow':      '每个节点 ≤ 10 字；最多 8 个；note ≤ 45 字。',
-    'data_table':     '单元格 ≤ 22 字；最多 7 行 × 4 列。',
-    'tinted_bands':   '每条 name ≤ 10 字、desc ≤ 52 字；最多 4 条。',
-    'quote':          'quote 每行 ≤ 20 字，最多 2 行；attribution ≤ 30 字；'
-                      'body 最多 3 段、每段 ≤ 40 字。',
-}
+#
+# 这份预算**不再手写** —— 它是 `layout_spec.REGISTRY` 里每套版式的 `capacity`
+# 字段（与渲染函数写在一起）。早先这里和 `pipeline.LAYOUT_CATALOG` 是两份独立的
+# 手写清单，已经漂移：同一个 `stats.label`，目录里写 ≤20 字、这里写 ≤22 字，
+# 模型先看到 20、被压时被告知 22。
+def layout_capacity(name: str) -> str:
+    return layout_spec.capacity_text(name)
 
 # 报告里的页码 → spec 下标：封面(1) + 目录(2) 之后是正文
 PAGE_OFFSET = 2
@@ -67,7 +56,7 @@ def overflowing_slides(report: dict) -> dict[int, list[str]]:
 def repair_slide(spec: dict, problems: list[str], cfg, log=print) -> dict:
     """让模型重写单页 spec，压到容量以内。失败则原样返回。"""
     name = spec.get('layout')
-    cap = LAYOUT_CAPACITY.get(name, '尽量精简，控制在原文的 60% 以内。')
+    cap = layout_capacity(name)
     prompt = f"""下面是一页幻灯片的定义 JSON，它的文字超出了版式能容纳的范围。
 
 版式：{name}
