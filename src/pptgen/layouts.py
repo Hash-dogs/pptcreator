@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""20 套内容版式。每套是一个 `render(slide, spec)` 函数，spec 为 dict。
+"""19 套内容版式。每套是一个 `render(slide, spec)` 函数，spec 为 dict。
 
 版式**元数据与渲染函数写在一起**（`@layout(...)` 装饰器），登记进
 `layout_spec.REGISTRY`。喂给模型的版式目录与压文案的容量预算都由那份注册表
@@ -21,7 +21,6 @@
   流程      process_chain       横向流程链
             phase_grouped_flow  阶段分组流程（左侧阶段栏 + 组内并列）
             timeline_vertical   纵向时间线
-            node_flow           节点链（描边框 + 自动折返连接）
   层级      layered_stack       分层架构（层 × 模块）
   数据      data_table          原生表格
             metric_trend        原生图表（趋势 / 占比 / 排行）
@@ -81,8 +80,10 @@ def _fit(text, avail_in, pt, lines=1):
     而改不动 —— 这类确定性超标由程序截断最可靠。
 
     ⚠️ 截断是**静默**的：它让文字不再溢出，于是几何检查全绿，问题只在肉眼看渲染图
-    时才暴露（实测 `node_flow` 8 个节点里 6 个被截成残句 `小红书正文 · 爆款写作…`，
-    而几何报告是干净的）。所以 `fit_one_line` 会把每次截断记进 `tokens.TRUNCATIONS`，
+    时才暴露（历史案例：已删除的 `node_flow` 8 个节点里 6 个被截成残句
+    `小红书正文 · 爆款写作…`，而几何报告是干净的 —— 这条实测就是 `TRUNCATIONS`
+    与 `max_item_chars` 两个机制的由来，别因为那个版式没了就把它们当冗余删掉）。
+    所以 `fit_one_line` 会把每次截断记进 `tokens.TRUNCATIONS`，
     由 `build()` 收走并写进日志。
     """
     return fit_one_line(str(text), avail_in, pt, lines=lines)
@@ -740,15 +741,15 @@ def render_process_chain(s, spec):
         signature='阶段分组流程：左侧阶段名竖栏 + 组内节点横向并列，纵向堆叠',
         best_for='节点多（6–12 个）且标签较长的流程；内容能按阶段分组',
         avoid_for='3–5 步的简单流程（用 process_chain）',
-        fallback=('node_flow', 'timeline_vertical'),
+        fallback=('timeline_vertical', 'numbered_columns'),
         reuse_friendly=True,
         catalog='''阶段分组流程：把节点**按阶段分组**，每组一行，组内节点横向并列。
    必填 phases: [{"name":"阶段名（≤6 字）","nodes":["节点标签", ...]}]
      · 2–4 个阶段，每组 1–4 个节点，总节点 4–12 个
      · 节点标签 ≤20 字（框宽，可折两行；超过会被截断）
    选填 source
-   ⚠️ 节点多、标签长时**优先用这套**：node_flow 的节点框只有 2.30" 宽，
-      13pt 单行只放得下约 12 个字符，长标签会被静默截成残句。''',
+   ⚠️ 节点多、标签长时**优先用这套**：它是本套版式里唯一能让节点框折两行、
+      容下长标签的构图（框宽 3.09"、折两行约 34 字）。''',
         capacity='2–4 个阶段、每组 1–4 个节点、总节点 ≤12；'
                  '阶段名 ≤6 字；节点标签 ≤20 字。')
 def render_phase_grouped_flow(s, spec):
@@ -830,81 +831,6 @@ def render_timeline_vertical(s, spec):
             [[(st['name'], dict(size=15, color=DARK, bold=True)),
               ('   ' + st['desc'], dict(size=FS['small'], color=MUTED))]],
             anchor=MSO_ANCHOR.MIDDLE)
-    footer(s, spec['page'], spec.get('source'))
-
-
-# ══════════════════════════════════════════════════════════════
-@layout('node_flow',
-        roles=('content',),
-        intents=('process',),
-        min_items=6, max_items=8,
-        item_chars=10, total_chars=140,
-        # 节点框宽 2.30"、13pt 单行只放得下约 12 个字符 —— 硬上限写死，
-        # 否则超过 12 字的标签会被 `_fit()` 静默截断成「小红书正文 · 爆款写作…」。
-        max_item_chars=13,
-        signature='节点链（描边方框均匀铺开，超过每行上限自动折返）',
-        best_for='6–8 个**短标签**节点的工作流、系统流程',
-        avoid_for='标签超过 12 字（节点框只 2.30" 宽，会被截断）',
-        fallback=('phase_grouped_flow', 'timeline_vertical'),
-        reuse_friendly=True,
-        catalog='''节点链，6–8 个节点，自动折返。适合工作流、系统流程。
-   必填 nodes: ["Start 收集信息", "生成标题", ...]（每个标签 **≤10 字**）
-   选填 note（≤45 字）、source
-   ⚠️ 标签必须**短**：节点框宽 2.30"，13pt 单行只放得下约 12 个字符。
-      标签长（如「小红书标题 · chatgpt-4o-latest」）会被截成「小红书标题 · chatgpt-…」，
-      这种情况请改用 phase_grouped_flow。''',
-        capacity='nodes 6–8 个；每个标签 ≤10 字（超过会被截断）；note ≤45 字。')
-def render_node_flow(s, spec):
-    """节点链：描边圆角框 + 连接线，超过每行上限时自动折返。"""
-    header(s, spec.get('kicker'), spec.get('title'))
-    nodes = spec['nodes']
-    accent = spec.get('accent', [0, len(nodes) - 1])
-    bw = spec.get('box_w', 2.30)
-    bh = spec.get('box_h', 0.62)
-    per_row = spec.get('per_row', 4)
-    rows = (len(nodes) + per_row - 1) // per_row
-    rowgap = spec.get('row_gap', 1.75)
-    y0 = spec.get('y', 2.35)
-    for i, nm in enumerate(nodes):
-        col, row = i % per_row, i // per_row
-        in_row = min(per_row, len(nodes) - row * per_row)
-        gapx = (W - in_row * bw) / max(in_row - 1, 1) if in_row > 1 else 0
-        x = LEFT + col * (bw + gapx)
-        y = y0 + row * rowgap
-        is_accent = i in accent
-        b = outline_box(s, x, y, bw, bh, RED if is_accent else DARK)
-        tf = b.text_frame
-        tf.word_wrap = True
-        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
-        tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
-        p = tf.paragraphs[0]
-        p.alignment = PP_ALIGN.CENTER
-        r = p.add_run()
-        # 节点框高 0.62"，13pt 只够一行
-        r.text = _fit(nm, bw - 0.20, FS['small'])
-        r.font.size = Pt(FS['small'])
-        r.font.bold = True
-        r.font.color.rgb = RED if is_accent else DARK
-        r.font.name = LAT
-        rPr = r._r.get_or_add_rPr()
-        el = rPr.makeelement(qn('a:ea'), {})
-        el.set('typeface', EA)
-        rPr.append(el)
-        if col < in_row - 1:
-            hrule(s, x + bw + 0.09, y + bh / 2, gapx - 0.18, GREY, 1.0)
-    # 折返连接：上一行末尾 → 下一行开头
-    if rows > 1:
-        yret = y0 + bh + 0.53
-        vrule(s, RIGHT - 0.01, y0 + bh, yret - (y0 + bh), GREY, 1.0)
-        hrule(s, LEFT, yret, W, GREY, 1.0)
-        vrule(s, LEFT, yret, (y0 + rowgap) - yret, GREY, 1.0)
-    if spec.get('note'):
-        # note 可能是纯字符串、run 列表、或多段 —— 统一拼平后截成单行。
-        # 框高 0.6" 只够一行（15pt 两行正好顶到边界，实测会报溢出）。
-        note = _paras([spec['note']])
-        flat = ''.join(t for p in note for t, _ in p)
-        put(s, LEFT, 6.05, W, 0.6,
-            [[(_fit(flat, W, 15), dict(size=15, color=MUTED))]])
     footer(s, spec['page'], spec.get('source'))
 
 

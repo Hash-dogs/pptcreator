@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """版式回归网：每套版式各渲染一页，逐页过 build 自检与几何检查。
 
-为什么需要它：在这之前，20 个渲染函数里只有 `statement` 被间接触达，而且那条
+为什么需要它：在这之前，全部渲染函数里只有 `statement` 被间接触达，而且那条
 断言检查的是 spec 字段、**不是真实渲染**（`test_structure.py`）。新增或修改版式
 时，唯一的结构性防护是 `build.selfcheck()`（zip/rId 层面）与 `qa/geometry.py`
 （包围盒层面），二者都不遍历 `LAYOUT_NAMES` —— 写错一个坐标不会有任何东西报警。
@@ -181,13 +181,6 @@ FIXTURES = [
                dict(name='调试与发布', desc='对比助手输出与文档原文')],
         **_kicker('04 实战二 · 企业知识库'))),
 
-    ('node_flow', dict(
-        layout='node_flow', title='工作流总览：8 个节点跑通生产线',
-        nodes=['Start 收集', '生成标题', '生成正文', '生成前言',
-               '生成封面图', '取图片 URL', '组装结果', 'End 结束'],
-        note='可视化节点编排：LLM 生成 + HTTP 生图 + 代码处理 + 模板组装。',
-        **_kicker('04 实战三'))),
-
     ('layered_stack', dict(
         layout='layered_stack', title='Dify 的技术栈分层',
         layers=[dict(name='接入层', modules=['WebApp', 'API', '嵌入网站']),
@@ -258,11 +251,12 @@ class TestRegistry(unittest.TestCase):
         """每个渲染函数都有元数据，每条元数据都有渲染函数。"""
         self.assertEqual(sorted(layouts.LAYOUTS), sorted(layout_spec.REGISTRY))
 
-    def test_twenty_layouts(self):
-        self.assertEqual(len(layouts.LAYOUTS), 20, '版式数应为 20')
+    def test_layout_count(self):
+        # 19 = 原 20 套减去 node_flow（节点链，已被 phase_grouped_flow 取代）
+        self.assertEqual(len(layouts.LAYOUTS), 19, '版式数应为 19')
 
     def test_layout_spec_alone_is_not_empty(self):
-        """只 import layout_spec 也该看到 20 套版式。
+        """只 import layout_spec 也该看到 19 套版式。
 
         注册是 layouts.py 的 `@layout` 装饰器做的，所以这里靠 `_ensure_loaded()`
         把那次 import 推迟到第一次访问 —— 否则「必须先 import layouts」会变成
@@ -275,7 +269,7 @@ class TestRegistry(unittest.TestCase):
                 % os.path.join(ROOT, 'src'))
         out = subprocess.run([sys.executable, '-c', code],
                              capture_output=True, encoding='utf-8')
-        self.assertEqual('20 1', (out.stdout or '').strip(), out.stderr)
+        self.assertEqual('19 1', (out.stdout or '').strip(), out.stderr)
 
     def test_every_layout_is_reachable_by_intent(self):
         """每套版式都要能被某个 (role, intent) 组合选到，否则它永远不会被使用。"""
@@ -327,7 +321,7 @@ class TestCapacityFilter(unittest.TestCase):
         """**源文档条目的长度不能用来筛候选。**
 
         源条目天然是一整句（实测 40–120 字），而版式的单条预算是针对**成品**的
-        （22 字）—— 模型的工作正是把长句压短。早先拿源条目长度去卡候选，20 套被
+        （22 字）—— 模型的工作正是把长句压短。早先拿源条目长度去卡候选，版式被
         筛得只剩 statement，13 页内容全塌成一种版式。单条字数改为事后校验成品：
         见 `pipeline.overflow_reason`。
         """
@@ -337,20 +331,27 @@ class TestCapacityFilter(unittest.TestCase):
             self.assertIn('phase_grouped_flow', got,
                           '源条目 %d 字不该把候选筛光' % item)
 
-    def test_overflow_reason_flags_long_node_labels(self):
+    def test_overflow_reason_flags_long_module_names(self):
         """成品超容量要被拦下来 —— 这正是 `_fit()` 静默截断的事前防线。
 
-        实测 `node_flow` 那 8 个节点里 6 个被截成 `小红书正文 · 爆款写作…`，
-        而几何报告是干净的（截断消除了溢出）。
+        历史案例（该版式已删除）：`node_flow` 那 8 个节点里 6 个被截成
+        `小红书正文 · 爆款写作…`，而几何报告是干净的（截断消除了溢出）。
+
+        删除 node_flow 之后，声明了 `max_item_chars` 的版式只剩
+        `phase_grouped_flow`(34) 与 `layered_stack`(16)，所以这条挂在后者的
+        模块名上（单行定高字段，写长了必被 `_fit()` 截断）。**别把这条删了** ——
+        它是「超限被拦下」这一侧唯一的覆盖（`test_named_layouts_actually_render`
+        只覆盖「不超」那侧），删了 34/16 两个声明就再没人验。
         """
-        long_nodes = dict(layout='node_flow',
-                          nodes=['小红书标题 · chatgpt-4o-latest'] * 8)
-        self.assertIn('单条', pipeline.overflow_reason(long_nodes))
+        long_modules = dict(layout='layered_stack', layers=[
+            dict(name='接入层', modules=['这是一个明显超过十六个字符的模块名'])])
+        self.assertIn('单条', pipeline.overflow_reason(long_modules))
 
     def test_overflow_reason_passes_short_labels(self):
-        ok = dict(layout='node_flow', nodes=['Start 收集', '生成标题', '生成正文',
-                                             '生成前言', '生成封面图', '取 URL',
-                                             '组装结果', 'End 结束'])
+        ok = dict(layout='layered_stack', layers=[
+            dict(name='接入层', modules=['WebApp', 'API', '嵌入网站']),
+            dict(name='编排层', modules=['Prompt 编排', '工作流', 'Agent 框架']),
+            dict(name='能力层', modules=['RAG 引擎', '模型管理', '插件系统'])])
         self.assertEqual('', pipeline.overflow_reason(ok))
 
     def test_overflow_reason_flags_too_many_items(self):
@@ -495,7 +496,8 @@ class TestPlanStage(unittest.TestCase):
                 self.assertIn(p.get('intent'), layout_spec.INTENTS, p['title'])
 
     def test_plan_has_no_adjacent_duplicate(self):
-        """相邻页不得同版式 —— 实测这份 deck 的第 12、13 页是相邻的两个 node_flow。"""
+        """相邻页不得同版式 —— 实测旧产出里第 12、13 页是相邻的两个 `node_flow`
+        （该版式已删除，但相邻重复仍是硬约束）。"""
         plan = self._plan()
         names = [s['layout'] for s in plan['slides']]
         dup = [i for i in range(1, len(names)) if names[i] == names[i - 1]]
@@ -579,8 +581,9 @@ class TestRenderAll(unittest.TestCase):
     def test_no_silent_truncation(self):
         """样例的内容都该放得下 —— 出现截断说明框宽/框高估错了。
 
-        `_fit()` 的截断会消除溢出，所以几何检查看不见它（实测 node_flow 8 个
-        节点里 6 个被截成残句而报告全绿）。这条断言把静默截断变成可见的失败。
+        `_fit()` 的截断会消除溢出，所以几何检查看不见它（历史案例：已删除的
+        `node_flow` 8 个节点里 6 个被截成残句而报告全绿）。这条断言把静默截断
+        变成可见的失败。
         """
         from pptx import Presentation
         prs = Presentation(self.path)

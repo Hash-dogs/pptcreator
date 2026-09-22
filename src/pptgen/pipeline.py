@@ -43,7 +43,7 @@ DESIGN_RULES = """
 # ══════════════════════════════════════════════════════════════
 # 意图 → 候选版式
 #
-# 让模型从 20 个版式里盲选，是「大纲写『六参数对比表 + 三类调优技巧』、
+# 让模型从 19 个版式里盲选，是「大纲写『六参数对比表 + 三类调优技巧』、
 # 规划却选了 timeline_vertical」这类错配的温床。改成两步：先用**表达意图**与
 # **内容形态**把候选收窄到 2–4 个，再让模型在候选内选 —— 借鉴自 PPTAgent 的
 # layout_selector（它把版式按纯文本/多模态先二分，再在集合内让模型选）。
@@ -136,7 +136,8 @@ def page_candidates(page: dict, role: str, blocks: list[dict] | None) -> list[st
 
 # 每个版式的「条目列表」在 spec 的哪个字段、条目文本要从哪些子字段拼。
 # 用来校验**模型写出来的成品**是否超容量 —— 这是 `_fit()` 静默截断的事前防线：
-# 实测 node_flow 8 个节点里 6 个被截成「小红书正文 · 爆款写作…」，而几何报告全绿。
+# 历史案例（版式已删除）：node_flow 8 个节点里 6 个被截成「小红书正文 · 爆款写作…」，
+# 而几何报告全绿。这条实测是 `hard_item_chars` 机制存在的理由，别再拿它当冗余删掉。
 _ITEM_FIELDS = {
     'numbered_columns':   ('items', ('name', 'desc')),
     'tinted_bands':       ('bands', ('name', 'desc')),
@@ -145,7 +146,6 @@ _ITEM_FIELDS = {
     'comparison_rows':    ('rows', ('dim', 'a', 'b')),
     'process_chain':      ('steps', ('name', 'desc')),
     'timeline_vertical':  ('steps', ('name', 'desc')),
-    'node_flow':          ('nodes', ()),
     # 阶段名与**节点标签**都要量：真正会被 `_fit()` 截断的是节点标签，不是阶段名
     'phase_grouped_flow': ('phases', ('name', 'nodes')),
     'layered_stack':      ('layers', ('name', 'modules')),
@@ -282,7 +282,7 @@ def _add_dividers(outline: dict, doc: dict, log=print) -> dict:
     """给每章开头插一页章节隔断。
 
     **规则插入而不是让模型挑**：隔断页是结构页，它没有内容可依据 ——
-    让模型在 20 个版式里「选」一个结构页，只会选错。借鉴 PPTAgent 的
+    让模型在 19 个版式里「选」一个结构页，只会选错。借鉴 PPTAgent 的
     `_add_functional_layouts()`：功能性版式按位置规则插入，不参与内容驱动的选择。
     """
     if not config.section_dividers():
@@ -1180,7 +1180,7 @@ def _split_item(t: str) -> tuple[str, str]:
 # 图表的序列值、总纲句……），硬凑出来就是编造 —— 宁可不用，也不能编数字。
 _BUILDABLE = ('data_table', 'quadrant', 'numbered_columns', 'tinted_bands',
               'split_main_aside', 'process_chain', 'timeline_vertical',
-              'node_flow', 'statement')
+              'statement')
 
 # 条目可以**裁剪**的版式（多出来的条目去掉、排版仍然成立）。候选集用光时
 # 从这几个里借一个来避开相邻重复 —— 裁掉两条，也好过连着三页同一种构图。
@@ -1236,10 +1236,6 @@ def _heuristic_slide(page: dict, section: str, blocks: list[dict], *,
 
     items = [i.strip() for i in (bullets or paras) if (i or '').strip()]
     n = len(items)
-    # node_flow 的节点框只有 2.30" 宽，13pt 单行约 12 字。源条目更长时把它排除 ——
-    # 兜底路径没有模型来压文案，硬用只会被 `_fit()` 截成残句。
-    if items and max(len(i) for i in items) > 13:
-        allowed = [c for c in allowed if c != 'node_flow'] or ['statement']
 
     if n == 0:
         return dict(layout='statement',
@@ -1284,9 +1280,6 @@ def _heuristic_slide(page: dict, section: str, blocks: list[dict], *,
         return dict(layout='timeline_vertical', title=title,
                     steps=[dict(name=a, desc=b)
                            for a, b in map(_split_item, items[:8])], **base)
-    if want == 'node_flow':
-        return dict(layout='node_flow', title=title,
-                    nodes=[i[:13] for i in items[:8]], **base)
     if want == 'tinted_bands':
         return dict(layout='tinted_bands', title=title,
                     bands=[dict(name=a, desc=b)

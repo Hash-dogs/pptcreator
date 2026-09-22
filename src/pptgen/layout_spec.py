@@ -14,13 +14,13 @@
 
 另外两个机制借鉴自开源方案（PPTAgent 与 gpt-image2-ppt-skills）：
 
-- **意图映射 + 候选收缩**：先用 `page_role` / `content_intent` 把 20 套收窄到 2–4 个
-  候选，再让模型在候选内选。让模型从 20 个里盲选，是「大纲写『六参数对比表』、
+- **意图映射 + 候选收缩**：先用 `page_role` / `content_intent` 把 19 套收窄到 2–4 个
+  候选，再让模型在候选内选。让模型从全部版式里盲选，是「大纲写『六参数对比表』、
   规划却选了 timeline_vertical」这类错配的温床。
 - **容量前置校验**：条目数不落在 `[min_items, max_items]` 内的版式**直接剔除**，
-  而不是等渲染时由 `_fit()` 静默截断。实测 `node_flow` 那 8 个节点有 6 个被截成
-  残句（`小红书正文 · 爆款写作…`），而几何检查是全绿的 —— 截断让文字不再溢出，
-  于是 QA 看不见它。
+  而不是等渲染时由 `_fit()` 静默截断。历史案例（版式已删除）：`node_flow` 那 8 个
+  节点有 6 个被截成残句（`小红书正文 · 爆款写作…`），而几何检查是全绿的 ——
+  截断让文字不再溢出，于是 QA 看不见它。
 """
 from __future__ import annotations
 import re
@@ -65,8 +65,9 @@ class LayoutSpec:
     total_chars: int = 0                # 全页建议字数预算
     # 单条字数的**硬上限**，用于校验**模型写出来的成品**（不是源文档的条目 ——
     # 源条目天然是一整句，拿它去卡候选会把所有版式筛光）。默认取 item_chars + 6
-    # 作为折行容忍；真正装不下的（如 node_flow 的节点标签只有 2.30" 宽、13pt
-    # 单行约 12 字）要写死，否则长标签会被 `_fit()` 静默截断成残句。
+    # 作为折行容忍；真正装不下的（**单行定高**的字段，如 layered_stack 的模块框
+    # 16 字、timeline_vertical 半幅宽度下的 name+desc）要写死，否则长标签会被
+    # `_fit()` 静默截断成残句。
     max_item_chars: int | None = None
     requires: tuple[str, ...] = ()      # 内容形态前置条件: 'table' / 'numbers'
     # min/max_items 是否参与**预筛**（拿源文档的条目数去卡候选）。
@@ -200,13 +201,13 @@ def _capacity_ok(sp: LayoutSpec, shape: dict) -> bool:
         return False
     # ⚠️ **不按 max_item_chars 筛**。源文档里的条目本来就是一整句（实测 40–120 字），
     # 而版式的单条预算是针对**成品**的（22 字）—— 模型的工作正是把长句压短。
-    # 早先拿源条目的长度去卡候选，20 套被筛得只剩 statement，13 页内容全塌成一种版式。
+    # 早先拿源条目的长度去卡候选，版式被筛得只剩 statement，13 页内容全塌成一种版式。
     # 单条字数改为**事后**校验模型写出来的成品：见 pipeline._overflowing_items。
     return True
 
 
 def candidates(role: str, intent: str, shape: dict | None = None) -> list[LayoutSpec]:
-    """按角色 + 意图 + 内容形态，把 20 套收窄成候选集。"""
+    """按角色 + 意图 + 内容形态，把 19 套收窄成候选集。"""
     _ensure_loaded()
     shape = shape if shape is not None else EMPTY_SHAPE
     out = []
