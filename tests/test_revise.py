@@ -5,6 +5,7 @@
 而 `slides[]` 的下标是 `5 - 3`，中间隔着封面、目录、封底，还混着章节分隔页。
 映射只实现一次（`revise.build_page_index`），这里把它钉死。
 """
+import copy
 import os
 import sys
 import tempfile
@@ -411,6 +412,14 @@ class TestCheckOps(unittest.TestCase):
         self.assertEqual(level, 'warn')
         self.assertIn('现值', why)
 
+    def test_现值为空时缺expect不算问题(self):
+        # deck 里从来没有副标题（`_normalise_plan` 早先不回吐它）→ 没有可核对的
+        # 东西，不该报一句用户看不懂的「没回带现值」。封面重做天天走这条路。
+        level, why = revise.check_ops(
+            {'title': '', 'subtitle': ''},
+            [dict(path='subtitle', value='2026 年 9 月')])
+        self.assertEqual((level, why), ('ok', ''))
+
     def test_现值对不上就拒(self):
         # 这是模式 A 最危险的失败：模型把 items[2] 按 1 基理解、指着第 2 条，
         # 补丁本身完全合法、会静默落盘、改错条目。只有比对现值能拦住。
@@ -645,6 +654,200 @@ class TestApplyRevision(unittest.TestCase):
         out, rep = revise.apply_revision(self.deck, [dict(ops=[])])
         self.assertEqual(rep['items'][0]['status'], 'reject')
         self.assertIn('第几页', rep['items'][0]['reason'])
+
+    def test_整页重做的条目不能按微调应用(self):
+        # 用户在方案出来之后拨了模式开关：这一条只有整页内容、没有逐字段补丁，
+        # 照旧按微调应用会「什么都没改，却报成已改动」，还顺手写进台账
+        out, rep = revise.apply_revision(self.deck, [dict(
+            preview=3, request='重排',
+            new=dict(layout='statement', lines=[[['甲', {}]]]))])
+        self.assertEqual(rep['items'][0]['status'], 'reject')
+        self.assertIn('整页重做', rep['items'][0]['reason'])
+        self.assertEqual(out['slides'][0], self.deck['slides'][0])
+
+    def test_模板页重做的条目按微调也能应用(self):
+        # 与上一条相反：封面/目录的重做本身就带 ops（逐条可手改），拨错开关也
+        # 不会丢 —— 它走的本来就是字段补丁那条路
+        out, rep = revise.apply_revision(self.deck, [dict(
+            preview=1, new={'title': '新标题'},
+            ops=[dict(path='title', expect='原标题', value='新标题')])])
+        self.assertEqual(rep['items'][0]['status'], 'ok')
+        self.assertEqual(out['title'], '新标题')
+
+
+class TestTemplateRewrite(unittest.TestCase):
+    """封面/目录的「整页重做」= 重出文案（模板页没有版式可换）。
+
+    这两页不走 `redo_slide`（那条路按 `slides[]` 与 `outline.pages[]` 一一对应的
+    下标取内容，而封面/目录不在 `slides[]` 里），所以校验与落盘另有一套 ——
+    这一组把「模型给什么算能用」钉死。
+    """
+
+    def setUp(self):
+        self.deck = _deck(2, title='原标题', toc=['01 甲章 —— 甲', '02 乙章 —— 乙'],
+                          subtitle='2026 年 9 月')
+
+    def test_页面清单说明模板页可以重做(self):
+        # 这段 note 会进喂给模型的页码表（`page_table`），写着「不支持换版式」
+        # 时模型会把封面/目录的要求放进 unclear —— 文案一改，这条就得跟着改
+        idx = {e['preview']: e for e in revise.build_page_index(self.deck)}
+        self.assertIn('重做', idx[1]['note'])
+        self.assertIn('重做', idx[2]['note'])
+        self.assertIn('没有可改的内容', idx[5]['note'])       # 封底不变
+
+    def test_封面只取这一页有的键(self):
+        # 多写一个 layout 会顺着 commit_page 漏进 deck 顶层，而指纹、大纲、
+        # `_normalise_plan` 都不认它
+        self.assertEqual(
+            revise.template_new(self.deck, 1, {'title': '新标题', 'subtitle': '新副标题',
+                                               'layout': 'statement'}),
+            {'title': '新标题', 'subtitle': '新副标题'})
+
+    def test_封面只给标题就不动副标题(self):
+        self.assertEqual(revise.template_new(self.deck, 1, {'title': '新'}),
+                         {'title': '新'})
+
+    def test_空值当作没给(self):
+        self.assertEqual(revise.template_new(self.deck, 1, {'title': '  '}), {})
+        self.assertEqual(revise.template_new(self.deck, 2, {'toc': ['', ' 甲 ']}),
+                         {'toc': ['甲']})
+
+    def test_目录条数不能变(self):
+        self.assertEqual(revise.check_template_new(self.deck, 2, {'toc': ['a', 'b']}),
+                         ('ok', ''))
+        level, why = revise.check_template_new(self.deck, 2, {'toc': ['只剩一条']})
+        self.assertEqual(level, 'reject')
+        self.assertIn('一条对应一个章节', why)
+
+    def test_目录超长条目给提醒(self):
+        level, why = revise.check_template_new(self.deck, 2,
+                                               {'toc': ['零' * 40, '乙']})
+        self.assertEqual(level, 'warn')
+        self.assertIn('裁成', why)
+
+    def test_封面标题超长给提醒不拒(self):
+        level, why = revise.check_template_new(self.deck, 1, {'title': '长' * 25})
+        self.assertEqual(level, 'warn')
+        self.assertIn('折行', why)
+
+    def test_没有文案就拒(self):
+        self.assertEqual(revise.check_template_new(self.deck, 1, {})[0], 'reject')
+
+    def test_ops逐条带现值_目录按条拆(self):
+        # 面板只让 ≤80 字的标量手改，整列 toc 一条会渲染成一个装不下的长串
+        ops = revise.template_ops(revise.page_spec(self.deck, 2),
+                                  {'toc': ['新甲', '新乙']})
+        self.assertEqual([o['path'] for o in ops], ['toc[0]', 'toc[1]'])
+        self.assertEqual([o['expect'] for o in ops],
+                         ['01 甲章 —— 甲', '02 乙章 —— 乙'])
+
+    def test_提示词带上大纲与上限(self):
+        outline = dict(title='整份标题', sections=[
+            dict(name='01 甲章', summary='甲的一句话', pages=[dict(title='页一')]),
+            dict(name='02 乙章', summary='乙的一句话', pages=[])])
+
+        cover = revise.rewrite_template_prompt(self.deck, 1, outline, '压短一点')
+        self.assertIn('整份标题', cover)
+        self.assertIn('01 甲章', cover)
+        self.assertIn('压短一点', cover)
+        self.assertIn('%d 字' % revise.COVER_TITLE_MAX, cover)
+
+        toc = revise.rewrite_template_prompt(self.deck, 2, outline, '重排')
+        self.assertIn('正好 2 条', toc)          # 条数写进提示词，回来还要校验
+
+
+class TestCommitRewrite(unittest.TestCase):
+    """重做的落盘分派。这里有一条必须钉死的回归网：**负下标**。
+
+    早先两个入口各自写 `slides[preview - PAGE_OFFSET]`，`preview=1` 算出的是
+    `slides[-2]` —— 负下标在 Python 里合法，于是封面重做会**静默改掉倒数第二张
+    正文页**：不抛异常、`changed` 还报着「第 1 页变了」，而 deck 顶层的 title
+    一个字没动、成品封面根本没变。
+    """
+
+    def setUp(self):
+        self.deck = _deck(4, title='原标题', toc=['01 甲章 —— 甲'],
+                          subtitle='2026 年 9 月')
+
+    def test_封面重做写顶层_一页正文都不动(self):
+        slides = copy.deepcopy(self.deck['slides'])
+        got = revise.commit_rewrite(self.deck, 1, {'title': '新标题'})
+        self.assertEqual(got['reason'], '')
+        self.assertTrue(got['changed'])
+        self.assertEqual(self.deck['title'], '新标题')
+        self.assertEqual(self.deck['slides'], slides)           # slides[-2] 没被碰
+        self.assertEqual([p['field'] for p in got['outline']], ['cover.title'])
+
+    def test_目录重做写顶层_一页正文都不动(self):
+        slides = copy.deepcopy(self.deck['slides'])
+        got = revise.commit_rewrite(self.deck, 2, {'toc': ['01 甲章 —— 改了']})
+        self.assertEqual(got['reason'], '')
+        self.assertEqual(self.deck['toc'], ['01 甲章 —— 改了'])
+        self.assertEqual(self.deck['slides'], slides)
+        self.assertEqual([p['field'] for p in got['outline']], ['toc'])
+
+    def test_目录条目仍然过宽度夹取(self):
+        from pptgen import pipeline
+        long = '零' * 60
+        got = revise.commit_rewrite(self.deck, 2, {'toc': [long]})
+        self.assertEqual(self.deck['toc'], [pipeline._toc_line(long)])
+        self.assertLess(len(self.deck['toc'][0]), len(long))
+        self.assertTrue(got['changed'])
+
+    def test_与原来一样就不算改动(self):
+        # 没变就不该重渲这一页、也不该记进台账
+        got = revise.commit_rewrite(self.deck, 1, {'title': '原标题'})
+        self.assertEqual(got['reason'], '')
+        self.assertFalse(got['changed'])
+        self.assertEqual(got['outline'], [])
+
+    def test_面板上改过的ops以用户为准(self):
+        got = revise.commit_rewrite(self.deck, 1, {'title': '模型的'},
+                                    [dict(path='title', expect='原标题',
+                                          value='用户改的')])
+        self.assertEqual(got['reason'], '')
+        self.assertEqual(self.deck['title'], '用户改的')
+
+    def test_ops现值对不上就拒(self):
+        got = revise.commit_rewrite(self.deck, 1, None,
+                                    [dict(path='title', expect='别的标题',
+                                          value='x')])
+        self.assertIn('现值', got['reason'])
+        self.assertFalse(got['changed'])
+        self.assertEqual(self.deck['title'], '原标题')
+
+    def test_没有文案就拒(self):
+        got = revise.commit_rewrite(self.deck, 1, None)
+        self.assertIn('没有给出新文案', got['reason'])
+
+    def test_没有页码不动deck(self):
+        before = repr(self.deck)
+        got = revise.commit_rewrite(self.deck, None, dict(layout='statement'))
+        self.assertIn('没有说明是第几页', got['reason'])
+        self.assertEqual(repr(self.deck), before)
+
+    def test_越界页码不动deck(self):
+        before = repr(self.deck)
+        got = revise.commit_rewrite(self.deck, 99, dict(layout='statement'))
+        self.assertIn('不对应任何正文页', got['reason'])
+        self.assertEqual(repr(self.deck), before)
+
+    def test_正文重做仍然整页替换(self):
+        got = revise.commit_rewrite(self.deck, 3,
+                                    dict(layout='statement', lines=[[['甲', {}]]]))
+        self.assertTrue(got['changed'])
+        self.assertEqual(self.deck['slides'][0]['layout'], 'statement')
+        self.assertNotIn('items', self.deck['slides'][0])       # 不合并旧键
+        self.assertEqual(got['outline'], [])                    # 正文页不碰大纲
+
+    def test_不认识的版式被拒(self):
+        got = revise.commit_rewrite(self.deck, 3, dict(layout='node_flow'))
+        self.assertIn('不认识', got['reason'])
+        self.assertFalse(got['changed'])
+
+    def test_正文页越界被拒(self):
+        got = revise.commit_rewrite(self.deck, 42, dict(layout='statement'))
+        self.assertIn('不对应任何正文页', got['reason'])
 
 
 class TestCheckByBuild(unittest.TestCase):

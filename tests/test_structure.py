@@ -266,6 +266,23 @@ class TestOutlineAssembly(unittest.TestCase):
         self.assertEqual(plan['slides'][1]['title'], '页二')
         self.assertEqual(plan['slides'][1]['source'], 'S2')
 
+    def test_normalise_plan_带回副标题(self):
+        """封面副标题不在大纲生成提示词里，但**按页修订会写它**。
+
+        `revise.commit_page` 改封面副标题时同时写 deck 与 `outline['subtitle']`
+        （还是为了不被下一次重新规划冲掉）。这里不带出来的话，用户改过的副标题
+        会在下一次「生成 PPT」时静默变回日期兜底值 —— 别的字段都改了，只有它变回去。
+        """
+        sections = [dict(name='01 甲', summary='', pages=[
+            dict(title='页一', hint='', source='S1')])]
+        base = dict(title='T', toc=[], sections=sections)
+        slides = [dict(layout='numbered_columns', items=[])]
+
+        plan = pipeline._normalise_plan(slides, dict(base, subtitle='2026 年 9 月'))
+        self.assertEqual(plan['subtitle'], '2026 年 9 月')
+        # 没有这个键时不能炸，也不能凭空编一个
+        self.assertEqual(pipeline._normalise_plan(slides, base)['subtitle'], '')
+
     def _plan_one(self, anchor: str, title: str) -> dict:
         """用「模型自创的标题」（对不上任何 heading）规划一页。
 
