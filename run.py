@@ -348,10 +348,10 @@ def cmd_revise(args):
             rewrote = 0
             for it in triage['items']:
                 page = by_preview.get(it['preview']) or {}
-                if page.get('kind') in ('cover', 'toc', 'back'):
+                if page.get('kind') == 'back':
                     proposals.append(dict(it, status='reject', ops=[], new=None,
-                                          reason='%s 是模板页，只能微调，不能重做'
-                                                 % page.get('label')))
+                                          reason='%s —— 封底是品牌收尾页，'
+                                                 '没有可改的内容' % page.get('label')))
                     continue
                 if page.get('layout') == revise_mod.DIVIDER_LAYOUT:
                     proposals.append(dict(it, status='reject', ops=[], new=None,
@@ -366,6 +366,11 @@ def cmd_revise(args):
                     continue
                 rewrote += 1
                 print('[revise] 正在重做第 %d 页…' % it['preview'])
+                if page.get('kind') in ('cover', 'toc'):
+                    # 模板页没有版式可换：重做 = 重出这一页的文案
+                    proposals.append(dict(it, **revise_mod.propose_template_rewrite(
+                        deck, it['preview'], outline, it['request'], cfg)))
+                    continue
                 new, why = revise_mod.redo_slide(deck, it['preview'], outline, doc,
                                                 it['request'], cfg)
                 if new is None:
@@ -385,13 +390,14 @@ def cmd_revise(args):
             if p['status'] == 'reject':
                 print('    ✗ 不能应用：%s' % p['reason'])
                 continue
-            if mode == 'rewrite':
+            if mode == 'rewrite' and (p.get('new') or {}).get('layout'):
                 print('    版式：%s → %s' % (page.get('layout'),
                                             (p['new'] or {}).get('layout')))
                 print('    新大字：%s' % revise_mod.headline(p['new'] or {}))
                 if p['reason']:
                     print('    ! %s' % p['reason'])
                 continue
+            # 微调，以及封面/目录的重做（重出文案）—— 都是逐条的文字改动
             for c in p.get('changes') or []:
                 print('    改 %s：「%s」→「%s」' % (c['path'], c['before'][:34],
                                                   c['after'][:34]))
@@ -407,12 +413,21 @@ def cmd_revise(args):
 
         # ── 应用：先全量应用 + 预演构建，干净了才写盘 ──────────────
         rep: dict = {}
+        outline_patch: list = []
         if mode == 'rewrite':
             out_deck = copy.deepcopy(deck)
             for it, p in zip(triage['items'], proposals):
-                if p['status'] == 'reject' or p.get('new') is None:
+                if p['status'] == 'reject':
                     continue
-                out_deck['slides'][it['preview'] - revise_mod.PAGE_OFFSET] = p['new']
+                # 分派收在 `commit_rewrite` 里：封面/目录写 deck 顶层并带回大纲补丁，
+                # 正文页整页替换 —— 别自己写 `slides[preview-3]`，preview=1 是负下标。
+                got = revise_mod.commit_rewrite(out_deck, it['preview'],
+                                                p.get('new'), p.get('ops'))
+                if got['reason']:
+                    print('[revise] 第 %s 页未应用：%s'
+                          % (it['preview'], got['reason']))
+                    continue
+                outline_patch.extend(got['outline'])
         else:
             out_deck, rep = revise_mod.apply_revision(
                 deck, [dict(it, ops=p['ops']) for it, p in
@@ -428,7 +443,9 @@ def cmd_revise(args):
         changed = {p['preview'] for p in proposals if p['status'] != 'reject'}
         print()
         print('[revise] 预演构建（只为看改动的页有没有撑破版面）…')
-        issues = revise_mod.check_by_build(out_deck, build_qa, changed)
+        issues = revise_mod.check_by_build(out_deck, build_qa,
+                                           {pg for pg in changed
+                                            if pg >= revise_mod.PAGE_OFFSET})
         if issues:
             for pg, why in sorted(issues.items()):
                 print('[revise] ✗ 第 %d 页：%s' % (pg, '；'.join(why)))
@@ -439,10 +456,10 @@ def cmd_revise(args):
         pipeline.save_json(out_deck, spec_out)
         print('[revise] 已应用 %d 条 → %s' % (len(ok), spec_out))
         print('[revise] 成品 → %s' % out_pptx)
-        if mode != 'rewrite' and rep.get('outline'):
+        if outline_patch:
             print('[revise] 需要同步回大纲的字段：%s'
                   % '；'.join('%s → %s' % (p['field'], str(p['after'])[:30])
-                             for p in rep['outline']))
+                             for p in outline_patch))
             # 真的写回去 —— 目录条目与封面标题都是**从大纲派生的**，只改 deck 的话
             # 下一次 `plan` 会把它们 silently 冲掉。**先备份**：这一步改的是
             # 用户手头那份大纲，写坏了就没有回头路。
@@ -453,11 +470,11 @@ def cmd_revise(args):
                 if not os.path.isfile(bak):
                     pipeline.save_json(cur, bak)
                     print('[revise] 原大纲已备份 → %s' % bak)
-                pipeline.save_json(revise_mod.apply_outline_patch(cur, rep['outline']),
+                pipeline.save_json(revise_mod.apply_outline_patch(cur, outline_patch),
                                    opath)
                 print('[revise] 已同步回大纲 → %s' % opath)
         runlog.note('revise', mode=mode, items=len(proposals), applied=len(ok),
-                    spec=spec_out, outline_patch=rep.get('outline') or [])
+                    spec=spec_out, outline_patch=outline_patch)
         runlog.attach_pptx(out_pptx)
         st.update(applied=len(ok))
     return spec_out

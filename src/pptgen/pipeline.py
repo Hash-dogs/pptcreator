@@ -1560,7 +1560,12 @@ def _normalise_plan(slides: list[dict], outline: dict, log=None) -> dict:
         # 于是目录页整页没被填充，上面还留着模板的「议题一/议题二/议题三」。
         toc = [_toc_line(s.get('name'), s.get('summary'))
                for s in (outline.get('sections') or [])]
-    return dict(slides=clean, toc=toc, title=outline.get('title', ''))
+    # `subtitle` 也要回吐。它不在大纲生成提示词里（模型不产这个字段），但**按页
+    # 修订会写它** —— 用户改了封面副标题，`revise.commit_page` 同时写 deck 与
+    # `outline['subtitle']`，前端也把它合并回页面上那份大纲。这里不带上，
+    # 下一次「生成 PPT」就会把副标题悄悄丢掉：别的字段都改了，只有它变回默认。
+    return dict(slides=clean, toc=toc, title=outline.get('title', ''),
+                subtitle=outline.get('subtitle', ''))
 
 
 def _source_text(doc: dict) -> str:

@@ -15,6 +15,11 @@
     3..n-1 = `slides[0..]`       正文页或章节分隔页
     n     = 封底（模板页）        **没有可改内容**
 
+封面与目录两种模式都支持：微调是用户指名路径（`title` / `toc[2]`），
+**整页重做退化成「重出文案」** —— 它们没有版式可换（就是模板的第 1、2 页，
+`build.fill_cover` / `fill_agenda` 往占位符里写字），所以重做只换文字、
+不换那一页的身份。见 `propose_template_rewrite`。
+
 `build.build()` 里 `sl['page'] = i + 3`（build.py:193-195）与 `repair.PAGE_OFFSET`
 （repair.py:30 的 `idx = slide - 1 - 2`）是同一个约定的两处表述。
 
@@ -124,12 +129,12 @@ def build_page_index(deck: dict) -> list[dict]:
         fields=['title', 'subtitle'],
         title=deck.get('title') or '',
         subtitle=deck.get('subtitle') or '',
-        note='模板页，只能改标题与副标题（不支持换版式）'))
+        note='模板页：微调改标题/副标题，重做则重出这两句（版式不变）'))
 
     out.append(dict(
         preview=2, kind=KIND_TOC, label='预览 02 · 目录', slide_index=None,
         fields=['toc'], toc=list(deck.get('toc') or []),
-        note='模板页，只能改目录条目（不支持换版式）'))
+        note='模板页：微调改目录条目，重做则重排这些条目（版式不变）'))
 
     body_no = 0
     for i, sl in enumerate(slides):
@@ -367,6 +372,12 @@ def check_ops(spec: dict, ops: list[dict], *, path_of=None) -> tuple[str, str]:
         # 理解时，补丁本身完全合法、会静默落盘、改错条目 —— 只有比对现值能拦住。
         expect = op.get('expect')
         if expect is None or expect == '':
+            # 现值本来就是空的 → 没什么可核对的，别报一句用户看不懂的
+            # 「没回带现值」。这是封面/目录重做最常走的一条路：`page_spec` 对
+            # 封面总是给出 title 与 subtitle 两个键，而 deck 里通常只有 title
+            # （`_normalise_plan` 早先不回吐 subtitle）。
+            if not flat_text(get_path(spec, parts)).strip():
+                continue
             level = 'warn'
             msgs.append('`%s` 没有回带现值，无法确认改的是不是你说的那一处' % path)
             continue
@@ -538,6 +549,178 @@ def commit_page(deck: dict, preview: int, patch: dict, *, sync_outline: bool = T
     return []
 
 
+# ══════════════════════════════════════════════════════════════
+# 模板页的「整页重做」：重出文案，版式仍是模板自己那一页
+#
+# 封面与目录没有版式可换 —— 它们就是模板的第 1、2 页，`build.fill_cover` /
+# `fill_agenda` 往占位符里写字。于是「整页重做」在这两页上退化成**重出文案**：
+# 封面给新的 title/subtitle，目录给重排过的 toc 条目。它与微调共用同一条落盘
+# 路径（`check_ops` → `apply_ops` → `commit_page`），区别只在**谁出这份补丁** ——
+# 微调是用户指名路径，重做是模型看着整份大纲重拟。
+#
+# 这一段是纯逻辑：`commit_rewrite` 是唯一往 deck 上写的口子（两个入口都走它），
+# `template_new` / `check_template_new` 不碰模型，「重做出来的封面能不能用」
+# 于是能在单测里钉死。
+# ══════════════════════════════════════════════════════════════
+
+# 封面标题的字数上限。**版面事实**，不是随手定的：封面占位符 6.18×2.16 英寸
+# （docs/程序运行逻辑.md 的提示词硬约束表）。超了 `build.fill_cover` 会先折行、
+# 再往下降字号，54→20 磅全试完还装不下就**静默截断**（只留一行
+# `[build] N 处文案超长被截断` 的日志），而封面又在几何检查的 skip 名单里 ——
+# 没有任何东西会替它报警。所以提前给模型划一条线。
+COVER_TITLE_MAX = 20
+# 副标题同理，但模板那个框比标题小得多，且 python-pptx 读不到继承字号，
+# 算不出宽度 —— 只能按字数提醒，不做精确计算。
+COVER_SUBTITLE_MAX = 20
+
+
+def template_new(deck: dict, preview: int, raw) -> dict:
+    """模型给的重做结果 → 这一页的补丁 dict（只留这一页真有的键）。
+
+    封面只有 `title`/`subtitle`、目录只有 `toc`；模型多写一个 `layout` 就会顺着
+    `commit_page` 漏进 deck 顶层，而 `deck_fingerprint`、`_normalise_plan` 与大纲
+    都不认它，只会让「到底改了什么」说不清。空字符串当作「这条没给」——
+    不留空标题。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    for k in page_spec(deck, preview):
+        if k not in raw:
+            continue
+        v = raw[k]
+        if k == 'toc':
+            got = [str(t).strip() for t in v] if isinstance(v, list) else []
+            got = [t for t in got if t]
+            if got:
+                out[k] = got
+            continue
+        v = v.strip() if isinstance(v, str) else v
+        if v:
+            out[k] = v
+    return out
+
+
+def check_template_new(deck: dict, preview: int, patch: dict) -> tuple[str, str]:
+    """校验模板页重做出来的新文案。→ ('ok' | 'warn' | 'reject', 人话原因)。
+
+    这一页**没有几何检查兜底**：`qa/geometry.py` 默认跳过第 1/2/n 页，而
+    `repair.repair_slide` 也救不了它（它要求版式不变**且**文案变短，
+    repair.py:83-90 —— 重做出来的文案完全可能更长）。长度与条数这两件事
+    只能在这里守，外加 `commit_page` 里那一道 `_toc_line` 宽度夹取。
+
+    拒的都是会让成品说不清的：空补丁、目录条数与原来对不上（一条对应一个章节，
+    对不上就会出现对不上的分隔页）。超字数只是提醒 —— 它会折行或缩字号。
+    """
+    if not patch:
+        return 'reject', '这一页没有给出任何新文案'
+    msgs: list[str] = []
+    if preview == 1:
+        if not (patch.get('title') or ''):
+            return 'reject', '没有给出新的封面标题'
+        if len(patch['title']) > COVER_TITLE_MAX:
+            msgs.append('标题 %d 字，超过 %d 字会被折行或截断'
+                        % (len(patch['title']), COVER_TITLE_MAX))
+        sub = patch.get('subtitle') or ''
+        if len(sub) > COVER_SUBTITLE_MAX:
+            msgs.append('副标题 %d 字偏长，模板那个框很小，可能压到边'
+                        % len(sub))
+        return ('warn' if msgs else 'ok'), '；'.join(msgs)
+
+    toc = patch.get('toc') or []
+    if not toc:
+        return 'reject', '没有给出新的目录条目'
+    cur = len(page_spec(deck, 2).get('toc') or [])
+    if cur and len(toc) != cur:
+        return 'reject', ('目录 %d 条，原来是 %d 条 —— 一条对应一个章节，'
+                          '重做只能重写每条的措辞，不能增删条目'
+                          % (len(toc), cur))
+    # 超宽的条目会被 `_toc_line` 夹掉尾巴，而目录页不做几何检查 —— 夹了就要
+    # 说出来：静默变短正是这一整块最不想要的那种失败。
+    from . import pipeline
+    for i, t in enumerate(toc):
+        if pipeline._toc_line(t) != t:
+            msgs.append('第 %d 条太长，会被裁成「%s」'
+                        % (i + 1, pipeline._toc_line(t)))
+    return ('warn' if msgs else 'ok'), '；'.join(msgs)
+
+
+def template_ops(spec: dict, patch: dict) -> list[dict]:
+    """重做出来的文案 → 逐路径 ops（带 `expect` 现值回带）。
+
+    转这一道是为了**面板上能逐条手改**，也是为了让重做与微调在落盘时走同一条
+    校验：`diff_ops` 的每一行都要有 path，而整列 `toc` 一条会渲染成一个装不下
+    的长串（面板只让 ≤80 字的标量可编辑）。目录因此按 `toc[i]` 逐条出。
+    """
+    ops: list[dict] = []
+    for k, v in patch.items():
+        if k == 'toc':
+            cur = list(spec.get('toc') or [])
+            for i, t in enumerate(v):
+                ops.append(dict(path='toc[%d]' % i,
+                                expect=cur[i] if i < len(cur) else '',
+                                value=t, why=''))
+            continue
+        ops.append(dict(path=k, expect=spec.get(k) or '', value=v, why=''))
+    return ops
+
+
+def commit_rewrite(deck: dict, preview: int, new, ops: list | None = None) -> dict:
+    """把一条「整页重做」的结果写回 deck（**就地**）。
+
+    → `{'outline': [大纲补丁], 'changed': bool, 'reason': '' 或人话}`
+
+    两种页面走两条路：
+
+        预览 1/2   模板页 → 重出文案：补丁写进 deck 顶层，并带回
+                   `cover.title` / `cover.subtitle` / `toc` 三条大纲补丁
+        正文页     整页替换 `slides[preview - 3]`（换版式后旧版式的键一起丢）
+
+    **这个分派必须在这里收口。** 早先 `server.run_apply` 与 `run.py` 各自写
+    `out_deck['slides'][preview - PAGE_OFFSET] = new`，而 `preview=1` 算出的是
+    `slides[-2]` —— 负下标在 Python 里合法，于是封面重做会**静默改掉倒数第二张
+    正文页**：不抛异常、`changed` 还报着「第 1 页变了」，而 deck 顶层的 `title`
+    一个字没动、成品封面根本没变。两份实现迟早会分叉，所以收成一个函数。
+
+    `changed` 为假 = 写了但内容与原来一样（`commit_page` 只在真的变了才回补丁），
+    调用方据此决定要不要重渲这一页、算不算进台账。
+    """
+    if not isinstance(preview, int):
+        return dict(outline=[], changed=False, reason='没有说明是第几页')
+    if preview in (1, 2):
+        spec = page_spec(deck, preview)
+        if ops:
+            # 面板上可能被手改过新值 —— 和微调一样过一遍校验（`expect` 回带能
+            # 抓住「改的是另一条」）。`ops` 来自浏览器，不是可信输入。
+            level, why = check_ops(spec, ops)
+            if level == 'reject':
+                return dict(outline=[], changed=False, reason=why)
+            patch = apply_ops(spec, ops)
+        else:
+            patch = template_new(deck, preview, new)
+        if not patch:
+            return dict(outline=[], changed=False,
+                        reason='这一页没有给出新文案')
+        patches = commit_page(deck, preview, patch)
+        return dict(outline=patches, changed=bool(patches), reason='')
+
+    slides = deck.get('slides') or []
+    i = preview - PAGE_OFFSET
+    if not (0 <= i < len(slides)):
+        return dict(outline=[], changed=False,
+                    reason='第 %d 页不对应任何正文页' % preview)
+    if not isinstance(new, dict) or not new.get('layout'):
+        return dict(outline=[], changed=False,
+                    reason='这一页重做没有给出可用的内容')
+    if new['layout'] not in known_layouts():
+        return dict(outline=[], changed=False,
+                    reason='版式 %r 本版不认识' % new['layout'])
+    # 整页替换、不做键合并 —— 换版式后旧版式的键必须一起丢，否则
+    # `repair._text_len` 会把它们算进长度、触发莫名其妙的压文案（见 commit_page）。
+    slides[i] = new
+    return dict(outline=[], changed=True, reason='')
+
+
 # 几何检查里「这条会让页面难看/装不下」的三类
 HARD_ISSUES = ('text_overflow', 'text_overlap', 'past_safe_area')
 
@@ -621,6 +804,15 @@ def apply_revision(deck: dict, items: list[dict], *, log=print) -> tuple[dict, d
         patch = page_spec(out, preview)
         if not patch:
             rec.update(status='reject', reason='封底是品牌收尾页，没有可改的内容')
+            report['items'].append(rec)
+            continue
+        if it.get('new') and not it.get('ops'):
+            # 这一条其实是「整页重做」的方案，却被当成微调提交了（用户在方案出来
+            # 之后拨了模式开关）。它没有逐字段补丁 → 什么都不会改，而 `changed`
+            # 照样把这一页报成已改动：**静默的假成功**，还顺手写进台账。
+            rec.update(status='reject',
+                       reason='这一条是「整页重做」的方案（只有整页内容、没有逐字段'
+                              '补丁）—— 当前是「小范围修改」模式，请重新生成方案')
             report['items'].append(rec)
             continue
         level, why = check_ops(patch, it.get('ops') or [])
@@ -825,6 +1017,113 @@ def propose_patches(deck: dict, items: list[dict], cfg, log=print) -> list[dict]
         out.append(dict(it, ops=ops, status=level, reason=why,
                         changes=diff_ops(spec, ops) if level != 'reject' else []))
     return out
+
+
+# ── 模板页的整页重做（模型层，见上面那段纯逻辑的说明）────────────
+
+TEMPLATE_REWRITE_SYSTEM = (
+    '你在重写一份演示文稿的封面或目录页上的文字。只重写这一页，'
+    '不新增章节、不改动正文、不做解释。'
+)
+
+
+def rewrite_template_prompt(deck: dict, preview: int, outline: dict,
+                           request: str) -> str:
+    """封面/目录重做的提示词。
+
+    封面的标题与目录的条目都是**整份 deck 的概括**：只给这一页的现状，模型
+    无从知道该概括什么 —— 所以把章节名、各章 summary 与页标题都摊开，
+    并把条数与字数上限写死（这两条回来会被 `check_template_new` 校验）。
+    """
+    from . import pipeline
+    outline = outline or {}
+    secs = outline.get('sections') or []
+    lines = ['这一页现在的内容：',
+             json.dumps(page_spec(deck, preview), ensure_ascii=False, indent=1),
+             '',
+             '整份演示文稿（重写的依据）：',
+             '  标题：%s' % (outline.get('title') or '（没有）'),
+             '  共 %d 个章节：' % len(secs)]
+    for i, s in enumerate(secs, 1):
+        lines.append('    %d. %s —— %s'
+                     % (i, s.get('name') or '', (s.get('summary') or '')[:40]))
+        titles = [t for t in (p.get('title') or ''
+                              for p in (s.get('pages') or [])) if t]
+        if titles:
+            lines.append('       页：%s' % '、'.join(titles)[:120])
+    if not secs:
+        lines.append('    （拿不到大纲 —— 只能依据这一页现有的文字重写）')
+
+    if preview == 1:
+        what = '封面（第 1 页）'
+        want = ('只输出两句话，JSON：{"title": "…", "subtitle": "…"}\n'
+                '- `title` 是整份文稿的标题，不超过 %d 字'
+                '（版面事实：超了会被折行、再超就截断）；\n'
+                '- `subtitle` 一句补充（范围、对象、时间都行），不超过 %d 字；\n'
+                '- 两句都不要写「封面」「标题」这类标签，也不要换行符。'
+                % (COVER_TITLE_MAX, COVER_SUBTITLE_MAX))
+    else:
+        what = '目录（第 2 页）'
+        want = ('只输出目录条目，JSON：'
+                '{"toc": ["01  章节名 —— 一句话概括", "…"]}\n'
+                '- **正好 %d 条**，一条对应一个章节，顺序照上面的章节顺序；\n'
+                '- 章节名照抄（含编号），概括压到 15 字以内，整条不超过 %d 字；\n'
+                '- 分隔符用「 —— 」，不要项目符号、不要多余编号。'
+                % (len(page_spec(deck, 2).get('toc') or []), pipeline._TOC_MAX))
+
+    return f"""重写这份演示文稿的{what}上的文字。
+
+{chr(10).join(lines)}
+
+用户的要求：
+{request}
+
+要求：
+- 重写后的文字要自足：只看这一页就知道整份文稿讲什么。
+- 只重写这一页，不要提「第几页」，不要解释改动，不要动别的页。
+- 用户只点名改其中一部分时，**没点名的原样照抄** —— 不要顺手润色、不要换措辞
+  （改一句就动整页，用户在面板上要逐条核对，多出来的改动全是噪声）。
+
+{want}
+"""
+
+
+def propose_template_rewrite(deck: dict, preview: int, outline: dict, request: str,
+                             cfg, log=print) -> dict:
+    """模板页的整页重做：重出这一页的文案。→ 条目字段（`new`/`ops`/`changes`/…）。
+
+    为什么不复用 `redo_slide`：那条路是**版式驱动**的 —— `pipeline._plan_batch`
+    按 `slides[]` 与 `outline.pages[]` 一一对应的下标取内容，而封面/目录根本不在
+    `slides[]` 里，`redo_slide` 第一句 `i = preview - PAGE_OFFSET` 就是负数、
+    被它自己的越界检查挡回来。所以换一个产出：模型只回这一页的顶层字段，
+    落盘仍走 `commit_page` —— 与微调同一条路，于是校验、diff、面板渲染都不用
+    另写一套。
+
+    返回的正是**条目字段**，调用方 `dict(it, **got)` 拼进方案。面板上模板页的
+    重做因此与微调长得一样：逐条可勾选、新值可手改（`template_ops` 已经把
+    目录拆成 `toc[i]` 逐条）。
+    """
+    from . import llm
+    log('[revise] 第 %d 页整页重做（%s）…'
+        % (preview, '封面' if preview == 1 else '目录'))
+    try:
+        raw = llm.ask_json(rewrite_template_prompt(deck, preview, outline, request),
+                           cfg, system=TEMPLATE_REWRITE_SYSTEM)
+    except llm.LLMError as e:
+        return dict(status='reject', new=None, ops=[], changes=[],
+                    reason='模型调用失败：%s' % str(e)[:120])
+    patch = template_new(deck, preview, raw)
+    level, why = check_template_new(deck, preview, patch)
+    if level == 'reject':
+        return dict(status='reject', new=None, ops=[], changes=[],
+                    reason='重做没能给出可用的文案：%s' % why)
+    spec = page_spec(deck, preview)
+    ops = template_ops(spec, patch)
+    # `tpl_kind` 是给面板看的标记：模板页重做的 `new` 是个**没有 `layout` 的 dict**，
+    # 面板光看 `new` 分不清它是「封面文案」还是「正文页但版式丢了」，会渲染成
+    # 「版式 ? → ?」。显式标出来，界面就能说人话。
+    return dict(status=level, new=patch, ops=ops, tpl_kind=KIND_COVER if preview == 1
+                else KIND_TOC, changes=diff_ops(spec, ops), reason=why)
 
 
 def _layout_ok(sl: dict, cands: list[str], banned: set[str]) -> str:

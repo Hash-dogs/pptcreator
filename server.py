@@ -399,6 +399,23 @@ def _ledger_changes(stem: str) -> dict:
     return dict(count=len(revs), pages=pages)
 
 
+def _lazy_json(path: str):
+    """按需读一份 json（读到的结果缓存住）。
+
+    用来延迟加载规划产物：正文页重做要用 `outline` / `parsed`（`redo_slide` 按
+    `slides[]` 的下标回原文取条目），而封面/目录的重做只看 deck 本身 —— 这两份文件
+    缺失或改名时，「只改封面」不该跟着一起失败。
+    """
+    box: list = []
+
+    def get():
+        if not box:
+            box.append(pipeline.load_json(path))
+        return box[0]
+
+    return get
+
+
 def run_revise(jid: str, deck_arg: str, mode: str, text: str):
     """阶段一：分诊 + 出方案。**不落盘**（除了草稿，供刷新页面后取回）。"""
     try:
@@ -434,16 +451,22 @@ def run_revise(jid: str, deck_arg: str, mode: str, text: str):
         if mode == 'rewrite':
             outline = pipeline.load_json(
                 os.path.join(PLANS, stem + '.outline.json'))
-            doc = pipeline.load_json(os.path.join(PLANS, stem + '.parsed.json'))
+            # `.parsed.json` 只有**正文页**重做要用（`redo_slide` 按锚点回原文取
+            # 条目）；封面/目录的重做只看大纲。延迟加载：那份文件缺失或改名时，
+            # 「只改封面」这种请求不该跟着一起失败。
+            doc = _lazy_json(os.path.join(PLANS, stem + '.parsed.json'))
+
             items = []
             cap = revise_mod.max_rewrite_pages()
             rewrote = 0
             for n, it in enumerate(triage['items'], 1):
                 page = by_preview.get(it['preview']) or {}
-                if page.get('kind') in ('cover', 'toc', 'back'):
+                if page.get('kind') == 'back':
+                    # 只剩封底要拦：它是模板的品牌收尾页，没有可改的内容
+                    # （`revise.page_spec` 对它返回空 dict）。
                     items.append(dict(it, status='reject', new=None,
-                                      reason='%s 是模板页，只能微调，不能整页重做'
-                                             % page.get('label')))
+                                      reason='%s —— 封底是品牌收尾页，'
+                                             '没有可改的内容' % page.get('label')))
                     continue
                 if page.get('layout') == revise_mod.DIVIDER_LAYOUT:
                     items.append(dict(it, status='reject', new=None,
@@ -462,7 +485,14 @@ def run_revise(jid: str, deck_arg: str, mode: str, text: str):
                 rewrote += 1
                 _log(jid, '正在重做第 %d 页…（第 %d/%d 条）'
                      % (it['preview'], n + 1, len(triage['items']) + 1), 'active')
-                new, why = revise_mod.redo_slide(deck, it['preview'], outline, doc,
+                if page.get('kind') in ('cover', 'toc'):
+                    # 模板页没有版式可换，「重做」= 重出这一页的文案，仍写在
+                    # 模板自己的那一页上（`revise.propose_template_rewrite`）。
+                    items.append(dict(it, **revise_mod.propose_template_rewrite(
+                        deck, it['preview'], outline, it['request'], cfg,
+                        log=lambda m: _log(jid, m))))
+                    continue
+                new, why = revise_mod.redo_slide(deck, it['preview'], outline, doc(),
                                                 it['request'], cfg,
                                                 log=lambda m: _log(jid, m))
                 if new is None:
@@ -539,36 +569,50 @@ def run_apply(jid: str, deck_arg: str, mode: str, items: list, sha: str = '',
             raise RuntimeError(bad)
 
         _log(jid, '应用 %d 条修改…' % len(items))
+        outline_patch: list = []
         if mode == 'rewrite':
-            outline = pipeline.load_json(os.path.join(PLANS, stem + '.outline.json'))
-            doc = pipeline.load_json(os.path.join(PLANS, stem + '.parsed.json'))
+            # 这两份只有**正文页**重做要用（`redo_slide` 按 `slides[]` 的下标回原文
+            # 取条目）；封面/目录的重做只看 deck 本身。延迟加载：它们缺失或改名时，
+            # 「只改封面」这种请求不该跟着一起失败。
+            get_outline = _lazy_json(os.path.join(PLANS, stem + '.outline.json'))
+            doc = _lazy_json(os.path.join(PLANS, stem + '.parsed.json'))
+
             out_deck = copy.deepcopy(deck)
+            changed = []
             # **按顺序增量应用**：先把第 5 页写回，再算第 6 页的禁用版式 ——
             # 否则「第 5、6 页都重做」会同时选到同一个版式（相邻重复）
-            changed = []
             for it in items:
                 preview = it.get('preview')
+                if not isinstance(preview, int):
+                    _log(jid, '有一条没有页码，跳过', 'warning')
+                    continue
                 new = it.get('new')
-                if isinstance(new, dict) and new.get('layout'):
-                    # **用用户确认过的那一版，不要重跑模型。** 重跑会得到另一个
-                    # 结果 —— 用户在面板上看着 comparison_rows 点了「应用」，
-                    # 拿到的却是别的版式。而且要为此多花一次模型调用。
-                    # （`new` 来自浏览器，所以这里仍要校验。）
-                    if new['layout'] not in revise_mod.known_layouts():
-                        _log(jid, '第 %s 页确认的版式 %r 不认识，跳过'
-                             % (preview, new['layout']), 'warning')
+                if preview not in (1, 2) and not (isinstance(new, dict)
+                                                  and new.get('layout')):
+                    # 方案里没有成品（浏览器漏传、或用户把新值改坏了）→ 现算一版。
+                    # **模板页不走这条**：封面/目录的内容不在 `slides[]` 里，
+                    # `redo_slide` 只认正文页（见 `revise.commit_rewrite`）。
+                    new, why = revise_mod.redo_slide(out_deck, preview, get_outline(),
+                                                     doc(), it.get('request') or '',
+                                                     cfg, log=lambda m: _log(jid, m))
+                    if new is None:
+                        _log(jid, '第 %s 页重做失败：%s' % (preview, why), 'warning')
                         continue
-                    out_deck['slides'][preview - revise_mod.PAGE_OFFSET] = new
+                # **用用户确认过的那一版，不要重跑模型。** 重跑会得到另一个结果 ——
+                # 用户在面板上看着 comparison_rows 点了「应用」，拿到的却是别的版式；
+                # 而且要为此多花一次模型调用。（`new`/`ops` 来自浏览器，仍要校验。）
+                # 分派收在 `commit_rewrite` 里：封面/目录写 deck 顶层并带回大纲补丁，
+                # 正文页整页替换 —— 这里**不能**自己写 `slides[preview-3]`。
+                got = revise_mod.commit_rewrite(out_deck, preview, new, it.get('ops'))
+                if got['reason']:
+                    _log(jid, '第 %s 页未应用：%s' % (preview, got['reason']),
+                         'warning')
+                    continue
+                outline_patch.extend(got['outline'])
+                if got['changed']:
                     changed.append(preview)
-                    continue
-                new, why = revise_mod.redo_slide(out_deck, preview, outline, doc,
-                                                it.get('request') or '', cfg,
-                                                log=lambda m: _log(jid, m))
-                if new is None:
-                    _log(jid, '第 %s 页重做失败：%s' % (preview, why), 'warning')
-                    continue
-                out_deck['slides'][preview - revise_mod.PAGE_OFFSET] = new
-                changed.append(preview)
+                else:
+                    _log(jid, '第 %d 页与原来一样，没有变化' % preview, 'info')
         else:
             out_deck, rep = revise_mod.apply_revision(deck, items,
                                                       log=lambda m: _log(jid, m))
@@ -577,9 +621,10 @@ def run_apply(jid: str, deck_arg: str, mode: str, items: list, sha: str = '',
                     _log(jid, '第 %s 页未应用：%s' % (r['preview'], r['reason']),
                          'warning')
             changed = [r['preview'] for r in rep['items'] if r['status'] != 'reject']
-            if rep.get('outline'):
+            outline_patch = rep.get('outline') or []
+            if outline_patch:
                 _log(jid, '这些字段会同步回大纲：%s'
-                     % '、'.join(p['field'] for p in rep['outline']))
+                     % '、'.join(p['field'] for p in outline_patch))
 
         if not changed:
             raise RuntimeError('没有一条可以应用')
@@ -597,6 +642,13 @@ def run_apply(jid: str, deck_arg: str, mode: str, items: list, sha: str = '',
         _log(jid, '预演构建（检查改动的页有没有撑破版面）…', 'active')
         issues = revise_mod.check_by_build(out_deck, build_qa, set(changed))
         for pg, why in sorted(issues.items()):
+            if pg < revise_mod.PAGE_OFFSET:
+                # 封面/目录在几何检查的 skip 名单里，正常报不出来；真报出来也不能按
+                # `slides[pg-3]` 去取 —— 那是负下标。模板页的文案长度由
+                # `check_template_new` 与 `_toc_line` 守，这里只把话说出来。
+                _log(jid, '第 %d 页（模板页）有版面问题，这里不处理：%s'
+                     % (pg, '；'.join(why)), 'warning')
+                continue
             # 溢出是**可恢复**的，交给现成的 `repair_slide`（它冻结 layout、
             # 只压短），不要跑 `repair_deck` —— 那会挑**所有**溢出页、
             # 把用户没让改的页一起重写。
@@ -635,9 +687,9 @@ def run_apply(jid: str, deck_arg: str, mode: str, items: list, sha: str = '',
                  % len(shot['pages']), 'warning')
 
         # 大纲侧要同步：目录条目与封面标题都是**从大纲派生的**（pipeline.py:1529/1535），
-        # 不同步的话用户下一次点「生成」会把刚改的标题静默冲掉。
-        # （重做模式只动正文页，没有大纲侧要同步的东西 —— `rep` 在那个分支里也不存在。）
-        outline_patch = (rep.get('outline') or []) if mode != 'rewrite' else []
+        # 不同步的话用户下一次点「生成」会把刚改的标题静默冲掉。两种模式都会产生
+        # 补丁：微调由 `apply_revision` 报出来，重做里封面/目录那几条由
+        # `commit_rewrite` 收在上面（正文页重做没有大纲侧要同步的东西）。
         if outline_patch:
             opath = os.path.join(PLANS, stem + '.outline.json')
             try:
