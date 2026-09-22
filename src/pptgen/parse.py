@@ -17,6 +17,7 @@
     }
 """
 from __future__ import annotations
+import collections
 import io
 import os
 import re
@@ -86,7 +87,10 @@ def _dispatch(src, name: str, ext: str) -> dict:
     doc['blocks'] = blocks
     # 骨架在 `_clean` **之后**算：块的下标会被 `_clean` 改动（合并短段、
     # 丢页码），在下标定下来之前算出来的区间是错的。
-    doc['structure'] = structure.build_skeleton(blocks, doc.get('kind', ''))
+    # `outline` 只有 PDF 有（`/Outlines` 书签树），是比版面推断更硬的章节信号，
+    # 所以单独传给骨架层，而不是塞进块流里。
+    doc['structure'] = structure.build_skeleton(blocks, doc.get('kind', ''),
+                                                doc.get('outline'))
     doc['stats'] = dict(blocks=len(blocks),
                         chars=sum(len(_block_text(b)) for b in blocks))
     return doc
@@ -349,21 +353,350 @@ def _parse_docx(src, name: str) -> dict:
 
 
 def _parse_pdf(src, name: str) -> dict:
+    """PDF → blocks。**先认标题，再分页。**
+
+    早先这里把每页第一行直接当标题。实测上传的《Dify 介绍与实战》每页第一行是
+    **页码**（`1`/`2`/…/`39`），于是 40 页抽出 41 个 `1`、`2` 这样的「标题」，
+    连 `doc['title']` 都成了 `"1"`；真正的章标题（`1 初识 Dify`、`第二章 …`）躺在
+    正文里当段落，骨架只看到一页一个纯数字，最后整份文档压成 **1 个章节**。
+
+    现在按开源实现收敛出来的信号优先级抽标题：
+
+        书签(/Outlines)  →  编号模式  →  字号
+
+    书签是文档自带的目录，比任何版面推断都硬（实测这份 PDF 带完整三级书签），
+    所以有书签时不再按版面猜 —— 两种信号混在一起只会互相打架。都没有时退到
+    「每页一个页单元」，也就是改进前的粒度，不会更糟。
+    """
     import pypdfium2 as pdfium
     pdf = pdfium.PdfDocument(src)
+    pages = [_pdf_lines(pdf[i]) for i in range(len(pdf))]
+
+    # 页码与页眉页脚要在**算正文高度之前**去掉：它们是噪声，会带动基线。
+    running = _pdf_running_lines(pages)
+    for ls in pages:
+        keep = []
+        for k, x in enumerate(ls):
+            hit = x['text'] in running
+            # 页码只认页首/页尾那个位置：正文里的 `1`、`2` 可能是列表项编号。
+            if not hit and k in (0, len(ls) - 1) and _PAGE_NUM_RE.match(x['text']):
+                hit = True
+            if not hit:
+                keep.append(x)
+        ls[:] = keep
+
+    body = _pdf_body_height([x for ls in pages for x in ls])
+    bookmarks = _pdf_bookmarks(pdf)
+
     blocks, title = [], None
-    for i in range(len(pdf)):
-        t = pdf[i].get_textpage().get_text_range().replace('\r', '')
-        lines = [l.strip() for l in t.split('\n') if l.strip()]
-        if not lines:
+    for i, ls in enumerate(pages, 1):
+        if not ls:
             continue
-        head = lines[0]
-        if title is None:
-            title = head
-        blocks.append(dict(type='heading', level=1, text=head))
-        for l in lines[1:]:
-            blocks.append(dict(type='para', text=l))
-    return dict(source=name, kind='pdf', title=title, blocks=blocks)
+        here = [b for b in bookmarks if b['page'] == i]
+        levels: dict[int, int] = {}
+        cover = set()
+        for k, x in enumerate(ls):
+            hit = _pdf_bookmark_level(x['text'], here)
+            if hit is not None:
+                levels[k] = hit
+            elif not here:                  # 有书签就以书签为准，不按版面猜
+                lv = _pdf_line_level(x, body)
+                if lv is not None:
+                    levels[k] = lv
+                    # 第 1 页上**只靠字号**升出来的行 = 封面标题 / 装饰，不是章。
+                    # 不挡的话封面那两行大字会各成一个「章」（实测：22pt 的标题行
+                    # 16pt 的字盒，是正文 8pt 的两倍，稳定过 1.60 那道线）。
+                    # 带编号的（`第一章 …`、`1 绪论`）不算 —— 那页就是正文第一页，
+                    # 把整页当前置信息会让它的正文也一起消失。
+                    if i == 1 and _pdf_pattern_level(x['text']) is None:
+                        cover.add(k)
+        toc = _pdf_is_toc_page(ls)
+        if toc and not levels:
+            # 目录页整页都是点线引导，一行标题都升不出来 —— 但它必须是个页单元，
+            # 否则会被当成「没有前置页」而混进正文。
+            levels[0] = _FALLBACK_LEVEL
+        if not levels:
+            # **兜底页单元**：这一页没有标题，用第一行当页单元名。
+            # 每页都得有页单元，否则「大纲标题对了、正文却取不到」——
+            # `_content_index` 是靠页名 → 块区间取内容的。
+            levels[0] = _FALLBACK_LEVEL
+        for k, x in enumerate(ls):
+            if k in levels:
+                blk = dict(type='heading', level=levels[k], text=x['text'], slide=i)
+                if toc:
+                    blk['role'] = 'toc'
+                elif k in cover:
+                    blk['role'] = 'cover'
+                blocks.append(blk)
+            else:
+                blocks.append(dict(type='para', text=x['text'], slide=i))
+        if i == 1:
+            title = _pdf_cover_title(ls)
+    return dict(source=name, kind='pdf', title=title, blocks=blocks,
+                outline=bookmarks)
+
+
+# ── pdf 的版面判据 ────────────────────────────────────────────
+# 页码：单独占一行、只有数字或罗马数字。挡掉实测的 `1`…`39`。
+_PAGE_NUM_RE = re.compile(r'^(?:\d{1,4}|[ivxlcdmIVXLCDM]{1,5})$')
+
+# 显式章节编号。中英文 PDF 里最硬的层级信号 —— 实测制度文件里正文 13.2pt、
+# `第一章 总则` 13.1pt，**字号完全分不开**，只有编号能认。
+# 单位表取自 RAGFlow `proj_match()` 与 LightRAG 的 `STYLE_KEY_PRIORITY`：
+# `部分` 要排在 `部` 前面，否则 `第二部分` 只会吃掉一个「部」字。
+_PDF_CHAP_RE = re.compile(r'^第\s*[\d一二三四五六七八九十百千]+\s*(?:章|篇|部分|部|编|卷)')
+_PDF_SECT_RE = re.compile(r'^第\s*[\d一二三四五六七八九十百千]+\s*[条节]')
+# 中文数字枚举：`一、概述`。RAGFlow 把它排在 `第X章`/`第X条` 之后。
+_PDF_CN_NUM_RE = re.compile(r'^[一二三四五六七八九十]{1,3}[、.．]\s*\S')
+# 括号枚举：`（一）概述` / `(1) 概述`
+_PDF_CN_PAREN_RE = re.compile(r'^[（(](?:[一二三四五六七八九十]{1,3}|\d{1,2})[）)]\s*\S')
+# 多级编号 `1.1` / `1.2.3`（`1. 定义` 不在此列 —— 点号后必须跟数字）。
+_PDF_MULTI_RE = re.compile(r'^(\d{1,2}(?:\.\d{1,2}){1,3})\s*[、.．]?\s+\S')
+# 单级编号 `1. 定义：` / `3、小结`
+_PDF_ONE_RE = re.compile(r'^(\d{1,2})\s*[、.．]\s*\S')
+# 光秃秃的序号：`1 初识 Dify`（中文书里最常见的一种章标题写法）
+_PDF_BARE_NUM_RE = re.compile(r'^(\d{1,2})\s+\S')
+
+# 编号层级的**相对阶梯**，抄 RAGFlow `proj_match()` / LightRAG `STYLE_KEY_PRIORITY`
+# 的顺序：章 → 条/节 → `一、` → `（一）` → 单级阿拉伯数字 → 多级数字（越深越细）。
+# 数值本身没有意义，`depth` 取的是「最浅且出现 ≥2 次的那一层」，
+# 所以一份只有 `一、` 枚举的文档照样能分成几章。
+_LV_CHAP, _LV_SECT = 1, 2
+_LV_CN_NUM, _LV_CN_PAREN, _LV_ENUM = 3, 4, 5
+
+# 点线引导的目录行：`前言........................ 7`
+_DOTLEAD_RE = re.compile(r'[.．·]{5,}\s*\d{0,3}\s*$')
+
+# 标题长度上限。**单级编号判得最保守**：实测制度文件里
+# `1. 负责基础 IT 架构运维，为 AI 应用提供计算资源、网络支撑。`（33 字）这类
+# 列表项会被当成小节标题，凭空多出两章。所以单级编号要短、且不能以句末标点收尾。
+_PDF_HEAD_MAX = 30
+_PDF_ONE_MAX = 20
+
+# 字号判据用**相对**比例：行高 ≥ 正文行高 × 1.30 才算大字号标题，
+# ≥ 1.60 才够第 1 层。实测《Dify》正文 10.2 / 二级 14.1（1.38×）/ 一级 20.0（1.96×）；
+# 制度文件标题 15.1 / 正文 13.2 = 1.14×，正好该被挡在门外（它靠编号分章）。
+_BODY_RATIO = 1.30
+_CHAP_RATIO = 1.60
+
+# 兜底页单元的层级。**不声称层级**，所以沉到第 2 层：
+# 它只是个内容单元，不该去争「章节」那一层 —— 否则末页那种没有 `第X章` 的页面
+# 会凭空多出一个 level 1 标题，被 `depth` 方法当成一章（实测制度文件会多出第 5 章）。
+_FALLBACK_LEVEL = 2
+
+
+def _pdf_lines(page) -> list[dict]:
+    """一页 → 逐行 `{text, h}`，h 是该行字符盒高度的最大值（≈ 该行字号）。
+
+    走 `get_charbox()` 而不是 `FPDFText_GetFontSize()` —— 后者在实测的两份
+    PDF 上**一律返回 1.0**（文本层被矩阵缩放过），标题和正文完全分不开。
+    charbox 给的是渲染后的盒子，高度直接可比。
+
+    字符下标要在**原始文本**上累加：`\r` 也是字符，先 `replace` 掉再数下标，
+    整页的偏移都会错位（行高于是张冠李戴）。
+    """
+    tp = page.get_textpage()
+    raw = tp.get_text_range()
+    out, off = [], 0
+    for seg in raw.split('\n'):
+        text = seg.rstrip('\r').strip()
+        if text:
+            hs = []
+            for i in range(off, off + len(seg)):
+                try:
+                    _, bottom, _, top = tp.get_charbox(i)
+                except Exception:           # 越界 / 无法成盒的字符
+                    continue
+                hs.append(top - bottom)
+            out.append(dict(text=text, h=max(hs) if hs else 0.0))
+        off += len(seg) + 1                 # +1 是 '\n' 本身
+    return out
+
+
+def _pdf_running_lines(pages: list[list[dict]]) -> set[str]:
+    """跨页重复出现的行 = 页眉 / 页脚 / 水印，整份文档都丢掉。
+
+    两个条件取向不同，都要：
+
+    - `≥50% 的页`：每页都盖一遍的水印。实测制度文件的
+      `迈胜医疗设备有限公司制度（信息安全）`是 7/7 页。
+    - `≥3 页 且落在页首前两行 且 ≤40 字`：只在开头几页出现的页眉。实测
+      `Dify: Product Introduction` 只在前 3 页，但它同时是第 2、3 页的**首行**，
+      留着会把这两页的页单元名字污染成同一串。
+    """
+    if len([ls for ls in pages if ls]) < 3:
+        return set()
+    seen: collections.Counter = collections.Counter()
+    for ls in pages:
+        for t in {x['text'] for x in ls}:
+            seen[t] += 1
+    half = max(3, int(len([ls for ls in pages if ls]) * 0.5))
+    heads = [tuple(x['text'] for x in ls[:2]) for ls in pages if ls]
+    return {t for t, c in seen.items()
+            if c >= 3 and (c >= half or
+                           (len(t) <= 40 and any(t in h for h in heads)))}
+
+
+def _pdf_body_height(lines: list[dict]) -> float:
+    """正文行高：**按字符数加权**的行高众数。
+
+    加权而不是取平均：几个大标题动不了它，短标题也不会因为条数多而压过正文。
+    行高按 0.5pt 归并 —— 同一行里的字符本身有 0.1 上下的抖动。
+    """
+    weight: collections.Counter = collections.Counter()
+    for x in lines:
+        if x['h'] > 0:
+            weight[round(x['h'] * 2) / 2.0] += len(x['text'])
+    return weight.most_common(1)[0][0] if weight else 0.0
+
+
+# 行 / 书签标题的归一：PDF 抽出来的文本里空白很不规律（连着几个空格、
+# 全角空格、行尾空格），比对前统一成单空格。
+_SPACES_RE = re.compile(r'\s+')
+
+# 标题开头的编号标记。比对书签与正文时要**带不带编号两种写法都比一遍** ——
+# 书签里写 `1.2 什么是 Dify`、正文那行写 `什么是 Dify`（或反过来）都常见。
+_MARKER_RE = re.compile(
+    r'^(?:第\s*[\d一二三四五六七八九十百千]+\s*(?:部分|部|章|篇|编|卷|[条节])\s*'
+    r'|[\d一二三四五六七八九十]{1,3}\s*[、.．]\s*'
+    r'|\d{1,3}(?:\.\d{1,3}){1,3}\s*[、.．]?\s+'
+    r'|\d{1,3}\s+)')
+
+
+def _norm_line(s: str) -> str:
+    return _SPACES_RE.sub(' ', s or '').strip()
+
+
+def _pdf_bookmarks(pdf) -> list[dict]:
+    """`/Outlines` → `[{level, title, page}]`（页码 1 基）。
+
+    这份书签树就是文档自己的目录，骨架层直接拿它当章节划分（`method='outline'`）。
+    """
+    out = []
+    for e in pdf.get_toc():
+        t = _norm_line(e.get_title())
+        # 书签里偶有整段重复（实测 `4.2 x 4.2 x `）—— 对齐后去重，否则页单元名很长。
+        half = len(t) // 2
+        if half > 3 and t[:half].strip() == t[half:].strip():
+            t = t[:half].strip()
+        try:
+            page = e.get_dest().get_index() + 1
+        except Exception:                   # 书签指向了不存在的页
+            continue
+        if t:
+            out.append(dict(level=int(e.level or 0), title=t, page=page))
+    return out
+
+
+def _pdf_bookmark_level(text: str, here: list[dict]):
+    """这一行是不是本页某条书签的标题？是的话返回它的层级（level + 1）。
+
+    匹配要宽容一点：书签里常带编号而正文那行不带（或反过来），所以**带不带编号
+    两种写法都比一遍**（docling 的 `HeadingHierarchyModel` 就是这么做的）。
+    反方向（正文是书签的前缀）要求 ≥4 个字 —— 否则页码那种残行会匹配上书签。
+    """
+    t = _norm_line(text)
+    for b in here:
+        for form in (b['title'], _MARKER_RE.sub('', b['title']).strip()):
+            if not form:
+                continue
+            if t == form or t.startswith(form + ' '):
+                return b['level'] + 1
+            if len(t) >= 4 and form.startswith(t + ' '):
+                return b['level'] + 1
+    return None
+
+
+def _pdf_pattern_level(text: str):
+    """编号模式给出的层级；不是编号标题返回 None。
+
+    层级见 `_LV_*` 那张相对阶梯。中英文写法都认 —— 中文文档的
+    `第X章`/`第X条`/`一、`/`（一）` 是两条纯文本路都指望不上的东西
+    （`structure._CHAPTER_RE` 只认前两种）。
+    """
+    t = text.strip()
+    if _PDF_CHAP_RE.match(t):
+        return _LV_CHAP
+    if _PDF_SECT_RE.match(t):
+        return _LV_SECT
+    if _PDF_MULTI_RE.match(t) and len(t) <= _PDF_HEAD_MAX:
+        return _LV_ENUM + _PDF_MULTI_RE.match(t).group(1).count('.')
+    if _PDF_CN_PAREN_RE.match(t):
+        return _LV_CN_PAREN if _enum_ok(t) else None
+    if _PDF_CN_NUM_RE.match(t):
+        return _LV_CN_NUM if _enum_ok(t) else None
+    if _PDF_ONE_RE.match(t) or _PDF_BARE_NUM_RE.match(t):
+        return _LV_ENUM if _enum_ok(t) else None
+    return None
+
+
+def _enum_ok(t: str) -> bool:
+    """枚举类编号（`一、`、`1.`、`1 `）的护栏：**要短、且不能以句末标点收尾**。
+
+    否则正文里的列表项会被当成小节标题 —— 实测
+    `1. 负责基础 IT 架构运维，为 AI 应用提供计算资源、网络支撑。` 让制度文件
+    凭空多出两章。结尾的 `：` 不算句子结束：`1. 定义：` 正是「标签 + 内容在后」
+    的小节标题写法。
+    """
+    return len(t) <= _PDF_ONE_MAX and not t.endswith(('。', '！', '？', '.', '!', '?'))
+
+
+def _pdf_size_level(h: float, body: float):
+    """字号给出的层级；不够大返回 None。"""
+    if body <= 0 or h < body * _BODY_RATIO:
+        return None
+    return 1 if h >= body * _CHAP_RATIO else 2
+
+
+def _pdf_line_level(x: dict, body: float):
+    """无书签时的标题判据：编号与字号**取更浅的那个**。
+
+    取更浅（而不是更可信的）是因为两者是「至少这么浅」的证据：编号说它是
+    `第X章`（第 1 层）、字号说它只是 1.4 倍（第 2 层），那它是章的**可能性**不
+    因为字号小而消失；反过来字号 2 倍但编号是 `1.1`，它至少是个小节。
+    """
+    pat = _pdf_pattern_level(x['text'])
+    size = _pdf_size_level(x['h'], body)
+    if pat is None:
+        return size
+    if size is None:
+        return pat
+    return min(pat, size)
+
+
+def _pdf_is_toc_page(ls: list[dict]) -> bool:
+    """目录页：有 `目录` / `CONTENTS` 行，或有 ≥3 行点线引导（`前言......7`）。"""
+    if any(_TOC_RE.match(x['text']) for x in ls):
+        return True
+    return sum(1 for x in ls if _DOTLEAD_RE.search(x['text'])) >= 3
+
+
+def _pdf_cover_title(ls: list[dict]):
+    """封面标题：首页**最大字号**那几行拼起来。
+
+    早先取 `lines[0]`，实测拿到的是页码 `"1"`。封面的大字标题常常被排版成两行
+    （实测 `Dify: Product` + `Introduction`），所以同字号的连续行要拼回去。
+    """
+    hs = [x['h'] for x in ls if x['h'] > 0]
+    if not hs:
+        return None
+    big = max(hs)
+    picked, n = [], 0
+    for x in ls:
+        if x['h'] < big * 0.95:
+            continue
+        if n and n + len(x['text']) > 60:
+            break
+        picked.append(x['text'])
+        n += len(x['text'])
+        if len(picked) >= 3:
+            break
+    if not picked:
+        return None
+    t = ' '.join(picked)
+    # 中英混排的排版习惯：汉字之间不留空格，汉字与拉丁字母之间留。
+    t = re.sub(r'([一-鿿，。：；、（）「」]) +(?=[一-鿿，。：；、（）「」])', r'\1', t)
+    return t.strip() or None
 
 
 def _decode_text(raw: bytes) -> str:

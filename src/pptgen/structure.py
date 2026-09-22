@@ -11,13 +11,19 @@
 做法借鉴了 book-to-skill 的思路：**先确定性抽结构，再让模型在结构上生成**
 （"Structure, not a summary"）。章节信号按可靠性从高到低尝试：
 
+    outline  文档自带的目录（PDF 的 `/Outlines` 书签树）
     divider  分隔页（pptx 里那张「巨号序号 + 章节名」的页）
     kicker   每页左上角的章节标签（`01 初识 DIFY`）
+    depth    标题层级（docx 的 Heading 1、md 的 `##`、pdf 升出来的标题）
     numeric  显式数字标题（`第3章` / `Chapter 5` / `01 产品介绍`）
-    depth    标题层级（docx 的 Heading 1、md 的 `##`）
     flat     都没有 → 单章
 
 方法认不出来就往下退化，最差退化到 `flat`（等同改进前的行为），不会更糟。
+
+`depth` 排在 `numeric` **之前**是有代价也有理由的：层级是解析层给的**事实**，
+而数字前缀是猜的 —— 实测制度文件里的 `1. 定义：`、`2. 公司自主 AI 平台：` 这类
+列表项会被数字前缀当成章标题，凭空多出 2 章（而且章均字数还过得去，
+`_plausible` 的护栏拦不住）。
 """
 from __future__ import annotations
 import re
@@ -31,6 +37,19 @@ _CHAPTER_RE = re.compile(
     r'^(?:第\s*([\d一二三四五六七八九十百]+)\s*[章部节篇]'
     r'|(?:Chapter|Part|Section|CHAPTER|PART|SECTION)\s*(\d{1,3})'
     r'|(\d{1,2})\s*[、.·]?\s+\S)', re.I)
+
+# 前置信息（不是章节）：目录 / 封面 / 扉页 / 版权页。文档自带的目录里常有它们，
+# 拿它们当章会让大纲第一章变成「目录」。
+_FRONT_TITLE_RE = re.compile(
+    r'^(?:目\s*录|目\s*錄|CONTENTS?|Table of Contents'
+    r'|封\s*面|扉\s*页|封\s*底|版\s*权|Cover|Title Page)$', re.I)
+
+# 章名前缀的剥除（`1 初识 Dify` / `第一章 总则` / `Chapter 2 Method`）——
+# 书签章名要重编成 `01 …`，不剥掉源编号就成了 `01 第一章 总则`。
+_SRC_NUM_RE = re.compile(
+    r'^(?:第\s*[\d一二三四五六七八九十百]+\s*[章篇节部]\s*'
+    r'|(?:Chapter|Part|Section)\s*\d{1,3}\s*[:.、]?\s*'
+    r'|\d{1,3}\s*[、.．]?\s+)', re.I)
 
 # 标题长度上限（book-to-skill 的护栏：超长的多半是段落不是标题）。
 _MAX_TITLE_CHARS = 80
@@ -71,6 +90,25 @@ def is_title_like(t: str) -> bool:
     return len(_WORDCHAR_RE.findall(t or '')) >= 4
 
 
+def front_title(t: str) -> bool:
+    """这段文字是不是前置信息（目录 / 封面 / 扉页）的标题。
+
+    文档自带的目录里常有这些条目，它们不是章节 —— 拿它们当章，大纲的第一章
+    会变成「目录」，而目录页的内容是各章标题粘在一起的产物，正好是这里最不想要的东西。
+    """
+    return bool(_FRONT_TITLE_RE.match((t or '').strip()))
+
+
+def has_word_char(t: str) -> bool:
+    """这段文字里有没有实义字符（汉字 / 字母）。
+
+    比 `is_title_like` 松一档，专给**兜底路径**用：`_flat` 是最后一道网，
+    把 `前言`、`总则` 这种两字标题滤掉是真丢内容，而把 `1`、`60,000+` 这种
+    纯数字留着只是难看 —— 两者取轻，所以这里只挡「一个实义字符都没有的」。
+    """
+    return bool(_WORDCHAR_RE.search(t or ''))
+
+
 def _num_key(text: str):
     """从 `01 初识 DIFY` / `1. 概述` 这类文本里取章节号。取不到返回 None。"""
     m = _NUM_PREFIX_RE.match(text or '')
@@ -91,6 +129,54 @@ def _chapter_key(text: str, level: int, method: str):
 # ══════════════════════════════════════════════════════════════
 # ① 找章节标记
 # ══════════════════════════════════════════════════════════════
+def _norm(s: str) -> str:
+    return re.sub(r'\s+', ' ', s or '').strip()
+
+
+def _marks_from_outline(blocks: list[dict], outline: list[dict]) -> list[dict]:
+    """文档自带的目录（PDF 的 `/Outlines` 书签树）→ 章节标记。
+
+    它比任何版面推断都硬：这是文档作者自己划的章节。实测上传的《Dify 介绍与实战》
+    带完整三级书签（章 / 节 / 小节），**只取最浅一层**当章节，节与小节留给块流
+    里的标题去当页单元（书签标题已在解析层升成 heading 了）。
+
+    章名重编成 `01 …`：源编号与 deck 编号是两回事（源里「前言」不占号、
+    正章从 1 起，直接沿用会撞号 —— 分隔页的大号编号靠 `_num_prefix` 取，
+    `01` 和 `1` 会同时出现在同一份 deck 上）。
+    """
+    entries = [e for e in (outline or []) if _norm(e.get('title'))]
+    if len(entries) < 2:
+        return []
+    lvl = min(e.get('level', 0) for e in entries)
+    entries = [e for e in entries
+               if e.get('level', 0) == lvl and not front_title(e['title'])]
+    if len(entries) < 2:
+        return []
+
+    # 页号 → 该页第一个块。书签的 dest 偶尔会落到页首之前，那时靠它兜底。
+    by_page: dict = {}
+    for i, b in enumerate(blocks):
+        by_page.setdefault(b.get('slide'), i)
+
+    marks = []
+    for k, e in enumerate(entries):
+        title = _norm(e['title'])
+        idx = None
+        for i, b in enumerate(blocks):
+            if (b['type'] == 'heading' and b.get('slide') == e.get('page')
+                    and _norm(b['text']) == title):
+                idx = i
+                break
+        if idx is None:
+            idx = by_page.get(e.get('page'))
+        if idx is None:
+            continue
+        base = _SRC_NUM_RE.sub('', title).strip() or title
+        marks.append(dict(idx=idx, key=title, name='%02d %s' % (k + 1, base),
+                          divider=False, blk=blocks[idx]))
+    return marks
+
+
 def _marks_from_roles(blocks: list[dict]) -> list[dict]:
     """走 pptx 的 `role` / `kicker`，返回章节标记。
 
@@ -121,11 +207,15 @@ def _marks_from_roles(blocks: list[dict]) -> list[dict]:
 
 
 def _marks_from_text(blocks: list[dict], method: str) -> list[dict]:
-    """走纯文本：numeric（数字标题）或 depth（层级）。"""
+    """走纯文本：numeric（数字标题）或 depth（层级）。
+
+    两条路都跳过前置页的标题（封面 / 目录 / 封底）—— `_marks_from_roles` 一直在
+    跳，纯文本这两条路原先没跳，于是走 docx / pdf 时封面标题会被当成第 1 章。
+    """
     marks: list[dict] = []
     if method == 'numeric':
         for i, b in enumerate(blocks):
-            if b['type'] != 'heading':
+            if b['type'] != 'heading' or b.get('role') in _FRONT_ROLES:
                 continue
             t = b['text'].strip()
             key = _chapter_key(t, b.get('level', 1), 'numeric')
@@ -135,7 +225,8 @@ def _marks_from_text(blocks: list[dict], method: str) -> list[dict]:
         return marks
 
     # depth：取「最浅且标题数 ≥2」的那一层；都不满足就取最浅的一层。
-    heads = [(i, b) for i, b in enumerate(blocks) if b['type'] == 'heading']
+    heads = [(i, b) for i, b in enumerate(blocks)
+             if b['type'] == 'heading' and b.get('role') not in _FRONT_ROLES]
     if not heads:
         return []
     by_level: dict[int, list[tuple[int, dict]]] = {}
@@ -200,11 +291,22 @@ def _assemble(blocks: list[dict], marks: list[dict], method: str) -> dict:
                     if b['type'] == 'heading' and b.get('role') in _FRONT_ROLES}
     front_slides.discard(None)
     front = [i for i, b in enumerate(blocks) if b.get('slide') in front_slides]
+    # 第 1 章的区间向前扩到**第一个非前置块**：封面之后、第一个章节标记之前
+    # 往往就是真内容（实测《Dify》书签的第一个正章是「前言」，而它前面还有
+    # 三页产品介绍）。不吸进来的话这段内容掉在所有章节之外 —— 而
+    # `_content_index` 是按页名取内容的，章节之外的块谁也拿不到，会静默变成
+    # 「标题对、正文空」的页面。
+    first = 0
+    front_set = set(front)
+    for i in range(n):
+        if i not in front_set:
+            first = i
+            break
     chapters = []
     for k, m in enumerate(marks):
-        start = m['idx']
+        start = first if k == 0 else m['idx']
         end = marks[k + 1]['idx'] if k + 1 < len(marks) else n
-        head_blk = blocks[start]
+        head_blk = blocks[m['idx']]
         pages = []
         for j in range(start, end):
             b = blocks[j]
@@ -231,8 +333,14 @@ def _assemble(blocks: list[dict], marks: list[dict], method: str) -> dict:
 
 
 def _flat(blocks: list[dict]) -> dict:
-    """兜底：整份文档当一章，每个标题当一页。"""
-    heads = [i for i, b in enumerate(blocks) if b['type'] == 'heading']
+    """兜底：整份文档当一章，每个标题当一页。
+
+    标题仍要过一道 `has_word_char`：实测 PDF 里每页的「标题」可能只是页码
+    （`1`、`2`），让它们当页名，大纲会拿一串数字去锚内容。但只挡纯数字 ——
+    `前言` 这种两字标题在这条路上被滤掉就是真丢内容。
+    """
+    heads = [i for i, b in enumerate(blocks)
+             if b['type'] == 'heading' and has_word_char(b['text'])]
     if not heads:
         return dict(chapters=[], method='flat', front_matter=[])
     pages = []
@@ -242,7 +350,7 @@ def _flat(blocks: list[dict]) -> dict:
                           lead=_page_lead(blocks, j, end),
                           chars=sum(len(block_text(blocks[x]))
                                     for x in range(j, end))))
-    doc_title = blocks[0]['text']
+    doc_title = blocks[heads[0]]['text']
     return dict(chapters=[dict(key='0', name=doc_title, subtitle='',
                                start=heads[0], end=len(blocks),
                                chars=sum(len(block_text(b)) for b in blocks),
@@ -264,29 +372,38 @@ def _plausible(sk: dict) -> bool:
     return median >= _MIN_CHAPTER_CHARS
 
 
-def build_skeleton(blocks: list[dict], kind: str = '') -> dict:
-    """blocks → 文档骨架。纯确定性，不调用模型。"""
+def build_skeleton(blocks: list[dict], kind: str = '',
+                   outline: list[dict] | None = None) -> dict:
+    """blocks → 文档骨架。纯确定性，不调用模型。
+
+    `outline` 是可选的文档自带目录（PDF 的 `/Outlines`），有它就以它为准。
+    """
     if not blocks:
         return dict(chapters=[], method='flat', front_matter=[])
 
-    # ① pptx 专用：分隔页 / kicker（最可靠，是版面事实）
+    # ① 文档自带的目录（PDF 书签树）—— 最硬：这是文档作者自己划的章节
+    marks = _collapse(_marks_from_outline(blocks, outline or []))
+    if len(marks) >= 2:
+        return _assemble(blocks, marks, 'outline')
+
+    # ② pptx 专用：分隔页 / kicker（是版面事实）
     marks = _collapse(_marks_from_roles(blocks))
     if len(marks) >= 2:
         return _assemble(blocks, marks, 'divider')
 
-    # ② 纯文本：显式数字标题
+    # ③ 标题层级（docx 的 Heading、md 的 `#`、pdf 升出来的标题）
+    marks = _collapse(_marks_from_text(blocks, 'depth'))
+    if len(marks) >= 2:
+        return _assemble(blocks, marks, 'depth')
+
+    # ④ 纯文本：显式数字标题
     marks = _collapse(_marks_from_text(blocks, 'numeric'))
     if len(marks) >= 2:
         sk = _assemble(blocks, marks, 'numeric')
         if _plausible(sk):
             return sk
 
-    # ③ 纯文本：标题层级
-    marks = _collapse(_marks_from_text(blocks, 'depth'))
-    if len(marks) >= 2:
-        return _assemble(blocks, marks, 'depth')
-
-    # ④ 都不成立
+    # ⑤ 都不成立
     return _flat(blocks)
 
 
