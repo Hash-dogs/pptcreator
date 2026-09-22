@@ -212,6 +212,191 @@ def overflow_reason(sl: dict) -> str:
 # ══════════════════════════════════════════════════════════════
 # ① 大纲
 # ══════════════════════════════════════════════════════════════
+# 章节数上限。与 `_divider_budget()` 的判据同源：分隔页是每章一页的结构页，
+# 章数一多就把页数预算吃光（`hi >= 章数 × 2` 才插得下分隔页），正文反而没页了。
+_MAX_CHAPTERS = 7
+
+
+def _chapter_cap(hi: int) -> int:
+    """这份 deck 最多几章：一页分隔 + 一页正文，每章至少两页预算。"""
+    return max(2, min(_MAX_CHAPTERS, hi // 2))
+
+
+def _needs_segment(n_chapters: int, n_pages: int, hi: int) -> bool:
+    """这个章节数要不要返工。两个方向相反的病：
+
+    - **太少**（1 章）：结构信号压根没抽出来（纯正文的 txt、没有书签也没有编号
+      的 pdf），整份文档压成一章 —— 这正是「大纲全部落在一个章节下」的样子。
+    - **太多**（> cap）：层级太碎，比如把 30 个同级标题都当成了章。再往下走，
+      `_repair_outline` 的 `_compress_sections` 会按页数预算把排不上的章**整章丢掉**，
+      那是真丢内容。
+
+    页单元不到 4 个就别折腾了 —— 分出来的章只有一两页，还不如不分。
+    """
+    if n_pages < 4:
+        return False
+    return n_chapters < 2 or n_chapters > _chapter_cap(hi)
+
+
+def _valid_groups(raw, n: int, cap: int):
+    """校验模型给的分组，通过则返回 `[(name, from, to)]`，否则 None。
+
+    **只接受一种形状**：从 1 起、首尾相接、覆盖到 n。分组是页单元的切片，
+    错一个就会让某一页的内容对不上锚点，而锚点是整条规划链路的取内容入口 ——
+    「分得不均衡」只是不好看，「区间错位」是内容错乱，所以这里宁缺毋滥。
+    """
+    if not isinstance(raw, list) or not (2 <= len(raw) <= cap):
+        return None
+    out, want = [], 1
+    for it in raw:
+        if not isinstance(it, dict):
+            return None
+        try:
+            a, b = int(it.get('from')), int(it.get('to'))
+        except (TypeError, ValueError):
+            return None
+        name = str(it.get('name') or '').strip()
+        # 章名只挡明显不是名字的（`目录` / `SECTION 1` / 纯数字），**不套
+        # `is_title_like`** —— 那个判据要求 ≥4 个实义字符，而「开篇」「总则」
+        # 「前言」这种两字章名再正常不过。
+        if a != want or b < a or b > n or not (2 <= len(name) <= 30) \
+                or _NOT_A_TITLE.match(name):
+            return None
+        out.append((name, a, b))
+        want = b + 1
+    return out if want == n + 1 else None
+
+
+def _even_groups(n: int, k: int) -> list[tuple[int, int]]:
+    """把 n 个页单元均分成 k 段（每段至少 1 个）。模型不可用时的兜底分组。"""
+    k = max(1, min(k, n))
+    base, extra = divmod(n, k)
+    out, at = [], 1
+    for i in range(k):
+        size = base + (1 if i < extra else 0)
+        out.append((at, at + size - 1))
+        at += size
+    return out
+
+
+def _apply_groups(sk: dict, units: list[dict],
+                  groups: list[tuple], method: str) -> dict:
+    """把「页单元 → 章」的分组落回骨架。
+
+    **块区间直接从页单元拼**（首尾页的 `start` / `end`），所以块下标一个都不用动，
+    `page_index()` 的「页名 → 区间」映射也不会过期。
+    """
+    first_start = (sk.get('chapters') or [{}])[0].get('start', 0)
+    chapters = []
+    for k, (name, a, b) in enumerate(groups):
+        part = units[a - 1:b]
+        # 章名里带着模型自己写的章节号就剥掉：编号由代码统一给，
+        # 免得出现 `01 02 初识 Dify` 或者和源文档的编号撞车。
+        base = re.sub(r'^\s*\d{1,2}\s*[、.．]?\s+', '', name or '').strip()
+        if not base or _NOT_A_TITLE.match(base):
+            base = next((p['name'] for p in part
+                         if structure.is_title_like(p['name'])), part[0]['name'])
+        chapters.append(dict(
+            key='%d' % (k + 1), name='%02d %s' % (k + 1, base[:20]),
+            subtitle='',
+            # 第 1 章要连上它前面被吸收进来的内容（`_assemble` 的区间前扩）
+            start=min(part[0]['start'], first_start) if k == 0 else part[0]['start'],
+            end=part[-1]['end'],
+            chars=sum(p['chars'] for p in part),
+            pages=part))
+    return dict(chapters=chapters, method=method,
+                front_matter=sk.get('front_matter') or [])
+
+
+_SEGMENT_SYSTEM = '你是中文商业演示的结构编辑，擅长把长文档切成分量均衡的几章。'
+
+
+def _segment_chapters(doc: dict, sk: dict, hi: int, cfg, log=print) -> dict | None:
+    """骨架分不出章（或分得太碎）时，让模型把**已有页单元**归成几章。
+
+    为什么不直接让模型自由分章：页单元是解析层定下来的块区间，锚点体系全靠
+    它们的名字。让模型只做**分组**，它的输出就能被确定性地校验（见 `_valid_groups`），
+    最坏情况是分得不均衡，不会出现「内容对不上」。
+
+    返回新的骨架；不需要动、或模型不可用又没有兜底必要时返回 None。
+    """
+    units = [p for c in (sk.get('chapters') or []) for p in (c.get('pages') or [])]
+    n = len(units)
+    cap = _chapter_cap(hi)
+    lo_n = max(2, min(3, n))
+    if not _needs_segment(len(sk.get('chapters') or []), n, hi):
+        return None
+    log('[outline] 骨架给出 %d 章 / %d 个页单元，交给模型重新分章（目标 %d–%d 章）'
+        % (len(sk.get('chapters') or []), n, lo_n, min(cap, 6)))
+
+    groups = None
+    if cfg is not None and config.outline_segment():
+        items = []
+        for i, p in enumerate(units, 1):
+            lead = (p.get('lead') or '')[:30]
+            items.append('%d. %s%s（%d 字）'
+                         % (i, p['name'], ('　' + lead) if lead else '',
+                            p.get('chars', 0)))
+        doc_title = (doc.get('title') or doc.get('source') or '').strip()
+        prompt = f"""下面是一份长文档{('《%s》' % doc_title) if doc_title else ''}的**页单元**清单
+（解析层切好的，顺序就是文档顺序）。请把它们归成 {lo_n}–{min(cap, 6)} 章，
+供一份中文汇报 PPT 使用。
+
+{chr(10).join(items)}
+
+要求：
+- 每一章是**连续**的一段页单元：区间首尾相接，合起来正好覆盖 1–{n}，
+  **不许漏、不许重、不许乱序**。
+- 章名是 4–14 字的名词短语，**不要写章节号**（编号由代码统一给），
+  不加书名号/引号，不以句号结尾。
+- 按内容逻辑分章：不要把 1 个页单元单独分成一章，也不要让某一章吃掉大半份文档。
+- {_mode_hint()}
+
+只输出 JSON：
+{{"chapters": [{{"name": "开篇与产品定位", "from": 1, "to": 4}}]}}
+"""
+        try:
+            data = llm.ask_json(prompt, cfg, system=_SEGMENT_SYSTEM, max_tokens=2000)
+            groups = _valid_groups((data or {}).get('chapters'), n, cap)
+            if groups is None:
+                log('[outline] 分章结果不合法（区间没覆盖 1–%d 或有漏/重），'
+                    '按页单元均分兜底' % n)
+        except (llm.LLMError, ValueError) as e:
+            log('[outline] 分章调用失败：%s' % e)
+
+    if groups is None:
+        if len(sk.get('chapters') or []) < 2:
+            # 「只有 1 章」是**结构信号缺失**，怎么分是语义判断 —— 没有模型就维持原状
+            # （等同改进前），不拿均分去凑一个看着像样的章数。
+            log('[outline] 结构信号缺失且分章不可用，维持单章')
+            return None
+        # 「章太多」则是**内容会被丢**：章数超过页数预算时，`_compress_sections`
+        # 会把排不上的章整章丢掉。均分至少保住每一页都还在某一章里。
+        groups = [(units[a - 1]['name'], a, b) for a, b in _even_groups(n, cap)]
+        method = 'even_split'
+    else:
+        method = 'llm_segment'
+    out = _apply_groups(sk, units, groups, method)
+    log('[outline] 已分章：%s' % ' / '.join(c['name'] for c in out['chapters']))
+    return out
+
+
+def _maybe_segment(doc: dict, hi: int, cfg, log=print) -> None:
+    """就地替换 `doc['structure']`。失败/不需要一律保持原样。"""
+    if not config.outline_segment():
+        return
+    sk = doc.get('structure') or {}
+    if not sk.get('chapters'):
+        return
+    try:
+        new = _segment_chapters(doc, sk, hi, cfg, log)
+    except Exception as e:              # 分章是锦上添花，绝不能让它炸穿主流程
+        log('[outline] 分章异常，保留原骨架：%s: %s' % (type(e).__name__, e))
+        return
+    if new:
+        doc['structure'] = new
+
+
 def make_outline(doc: dict, on_log=None) -> dict:
     """大纲的两个出口**都必须**带上 `_meta`。
 
@@ -225,13 +410,16 @@ def make_outline(doc: dict, on_log=None) -> dict:
     """
     log = on_log or print
     lo, hi = config.page_range()
-    # 先决定要不要留出章节分隔页 —— 它是结构页，要占页数预算，所以必须**先**扣掉，
+    cfg = config.llm_config()
+    # 骨架分不出章（或分得太碎）时先返工 —— 它改的是**章节数**，而章节数决定
+    # 分隔页要占多少页数预算，所以必须在 `_divider_budget` **之前**跑。
+    _maybe_segment(doc, hi, cfg, log)
+    # 再决定要不要留出章节分隔页 —— 它是结构页，要占页数预算，所以必须**先**扣掉，
     # 而不是等正文按 hi 生成完了再硬塞进去（那样总页数会超标）。
     n_div, lo, hi = _divider_budget(doc, lo, hi)
     if n_div:
         log('[outline] 预留 %d 页给章节分隔页，正文按 %d–%d 页控制' % (n_div, lo, hi))
     src = _source_text(doc)
-    cfg = config.llm_config()
     if cfg is not None:
         try:
             out = _outline_by_llm(doc, src, lo, hi, cfg, log)
@@ -341,6 +529,9 @@ _HEAD_TAIL = """
 # 于是分隔页那行 40pt 大字要 30 多字、被截成残句。这句话就是堵这个口子。
 _TITLE_RULE = """- **标题长度是版面事实**（超了会被压行或截断，很难看）：
   整份 PPT 的标题 ≤20 字；章节名 ≤14 字；页面标题 ≤24 字。
+- 结构里给出的**章节名要原样照抄**（连中英之间的空格一起，如 `02 初识 Dify`）。
+  实测模型会把空格吃掉写成 `02 初识Dify`，而那个名字要印在分隔页的 40pt 大字上，
+  中英挤在一起看着就是错字。
 - 结构里 `—`（破折号）**之后是该章的副题，不是章节名的一部分** ——
   章节名只取破折号之前那一段（如 `01 初识 Dify`），
   副题的信息放进这一章的 summary，不要拼进 name。

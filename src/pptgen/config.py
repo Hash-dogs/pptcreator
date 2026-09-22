@@ -195,6 +195,18 @@ def section_dividers() -> bool:
     return get_bool('PPTGEN_SECTION_DIVIDERS', True)
 
 
+def outline_segment() -> bool:
+    """骨架分不出章（或分得太碎）时，让模型把页单元归成几章。
+
+    它是**兜底**而不是主路径：能确定性抽出来的结构（书签 / 分隔页 / 标题层级）
+    绝不走它。只在两种情况下触发，见 `pipeline._chapter_count_ok()`。
+
+    关掉它：`.env` 里设 `PPTGEN_OUTLINE_SEGMENT=0` —— 那就退回「整份文档一章」
+    的老行为，适合想完全离线跑、一次模型调用都不多花的场合。
+    """
+    return get_bool('PPTGEN_OUTLINE_SEGMENT', True)
+
+
 def content_mode() -> str:
     m = (get('PPTGEN_CONTENT_MODE', 'balance') or 'balance').lower()
     return m if m in ('strict', 'balance', 'enrich') else 'balance'
