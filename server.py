@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 import argparse
+import copy
+import hashlib
 import json
 import mimetypes
 import os
@@ -41,6 +43,7 @@ from pptgen import config as cfg_mod           # noqa: E402
 from pptgen import parse as parse_mod          # noqa: E402
 from pptgen import pipeline                    # noqa: E402
 from pptgen import repair as repair_mod        # noqa: E402
+from pptgen import revise as revise_mod        # noqa: E402
 from pptgen import runlog as runlog_mod        # noqa: E402
 from pptgen.qa import geometry                 # noqa: E402
 
@@ -245,6 +248,16 @@ def run_generate(jid: str, outline: dict, parsed_path: str, name: str, rounds: i
             runlog.put('config', runlog_mod.config_snapshot())
         _log(jid, '本次流程日志：%s' % runlog.dir, 'info')
 
+        # 重新规划会从大纲**重做整份 deck**，磁盘上的按页修改根本不会参与 ——
+        # 所以先提醒。这与项目里「兜底产物必须显式标出」是同一条原则：
+        # 用户不该在事后才发现自己改了半天的东西没了。
+        prior = _ledger_changes(name)
+        if prior['count']:
+            _log(jid, '注意：这份 deck 之前有 %d 处人工修改（第 %s 页），'
+                      '本次重新规划会把它们覆盖掉'
+                 % (prior['count'], '、'.join(str(p) for p in prior['pages'])),
+                 'warning')
+
         _log(jid, '读取解析结果…')
         doc = pipeline.load_json(parsed_path)
 
@@ -282,7 +295,8 @@ def run_generate(jid: str, outline: dict, parsed_path: str, name: str, rounds: i
             deck, final = repair_mod.repair_deck(plan, build_qa, rounds=rounds,
                                                  verbose=False,
                                                  on_log=lambda m: _log(jid, m))
-            pipeline.save_json(deck, os.path.join(PLANS, '%s.deck.repaired.json' % name))
+            deck_live = os.path.join(PLANS, '%s.deck.repaired.json' % name)
+            pipeline.save_json(deck, deck_live)
 
             # 用最终 spec 重建一次，确保落盘的是修复后的版本
             build_mod.build(deck, cfg_mod.template_path(), pptx, fill_toc=True,
@@ -304,20 +318,371 @@ def run_generate(jid: str, outline: dict, parsed_path: str, name: str, rounds: i
             runlog.attach_pptx(pptx)
 
         with runlog.stage('render') as st:
+            work = os.path.join(VISUAL, name)
             _log(jid, '渲染每页预览图…', 'active')
-            pages = _render(pptx, os.path.join(VISUAL, name))
-            st.update(pages=len(pages))
-            runlog.note('render', pages=len(pages),
-                        visual_dir=os.path.join(VISUAL, name))
+            shot = _render(pptx, work, deck, deck_path=deck_live)
+            pages = shot['pages']
+            # 「本次重渲了几张」必须打出来：整目录重渲（十几页、两三分钟）与
+            # 增量重渲（一页、十秒）在日志上否则长得一模一样。
+            st.update(pages=len(pages), rendered=len(shot['rendered']))
+            runlog.note('render', pages=len(pages), rendered=shot['rendered'],
+                        visual_dir=work)
+            _log(jid, '预览图 %d 张（本次重渲 %d 张）'
+                 % (len(pages), len(shot['rendered'])), 'success')
 
+        # `deck` 与 `deck_live` 是**两份不同的文件**，别混用：
+        #   deck      = `<name>.deck.json`          规划刚产出、**修复回环之前**的那份
+        #   deck_live = `<name>.deck.repaired.json` 修复之后、**真正被渲染成这些预览图的**那份
+        # 修复回环会重写十几页文案，两份差异很大。按页修订必须打在 deck_live 上，
+        # 否则用户会看到「我只改了第 5 页标题，第 8、11 页的文案也一起变回去了」。
+        # 早先 result 里只有 `deck`（指向修复前），是本次为修订功能才发现并补齐的。
         _finish(jid, result=dict(
-            name=name, pptx=pptx, deck=deck_path, pages=pages,
+            name=name, pptx=pptx, deck=deck_path, deck_live=deck_live, pages=pages,
+            page_index=revise_mod.build_page_index(deck),
             summary=rep['summary'], slides=rep['slides'], log_dir=runlog.dir,
             download='/download/%s.pptx' % urllib.parse.quote(name)))
         _log(jid, '完成。', 'success',
              detail='%d 页，几何 %d error / %d warn'
                     % (len(deck.get('slides') or []), rep['summary']['error'],
                        rep['summary']['warn']))
+    except Exception as e:
+        traceback.print_exc()
+        _log(jid, '失败：%s' % e, 'warning')
+        _finish(jid, error='%s: %s' % (type(e).__name__, e))
+
+
+def _revision_draft_path(stem: str, rid: str) -> str:
+    return os.path.join(PLANS, '%s.revise-%s.json' % (stem, rid))
+
+
+def _append_ledger(stem: str, rec: dict) -> tuple[int, str]:
+    """记一笔「这份 deck 被人工改过」。→ (台账现有条数, 失败原因)。
+
+    台账的用途是**事后可追溯**：重新规划前提示「会丢弃 N 处人工修改」，
+    以及回答「这页标题是谁改的」。
+
+    返回值不是装饰：**写失败必须能看见**。它原来只 print 到 stdout（服务器上
+    没人看），而「台账静默没写进去」与「写进去了」在界面上完全一样。
+    """
+    path = _revisions_path(stem)
+    try:
+        data = pipeline.load_json(path) if os.path.isfile(path) else {}
+        if not isinstance(data, dict):
+            data = {}
+    except (ValueError, OSError) as e:
+        data = {}
+        print('  [warn] 台账读不了（按空的续写）：%s' % e)
+    data.setdefault('revisions', []).append(rec)
+    try:
+        pipeline.save_json(data, path)
+    except Exception as e:
+        return len(data['revisions']) - 1, '写台账失败：%s' % e
+    return len(data['revisions']), ''
+
+
+def _ledger_changes(stem: str) -> dict:
+    """这份 deck 有过几笔人工修改、涉及哪些页。→ `{'count': n, 'pages': [...]}`。
+
+    用途是「重新规划前提醒」：`/api/generate` 是从大纲重做整份 deck，
+    磁盘上的按页修改不会参与 —— 不提醒的话用户会在事后才发现改动没了。
+    """
+    try:
+        data = pipeline.load_json(_revisions_path(stem))
+    except (ValueError, OSError):
+        return dict(count=0, pages=[])
+    revs = data.get('revisions') if isinstance(data, dict) else None
+    if not isinstance(revs, list):
+        return dict(count=0, pages=[])
+    pages = sorted({int(pg) for r in revs if isinstance(r, dict)
+                    for pg in (r.get('changed') or [])
+                    if isinstance(pg, int)})
+    return dict(count=len(revs), pages=pages)
+
+
+def run_revise(jid: str, deck_arg: str, mode: str, text: str):
+    """阶段一：分诊 + 出方案。**不落盘**（除了草稿，供刷新页面后取回）。"""
+    try:
+        cfg = cfg_mod.llm_config()
+        if cfg is None:
+            raise RuntimeError('修订需要文本模型（配 PPTGEN_LLM_*）')
+        stem = _stem_of(deck_arg)
+        path, deck = _resolve_deck(stem)
+        if deck is None:
+            # 前端可能给的是绝对路径（它从上一轮 result 里拿到的）
+            cand = _safe_join(PLANS, os.path.basename(deck_arg or ''))
+            if cand and os.path.isfile(cand):
+                path, deck = cand, pipeline.load_json(cand)
+        if deck is None:
+            raise RuntimeError('找不到这份 deck：%s' % deck_arg)
+        stem = _stem_of(path)
+
+        bad = revise_mod.check_deck_layouts(deck)
+        if bad:
+            raise RuntimeError(bad)
+
+        index = revise_mod.build_page_index(deck)
+        _log(jid, '分诊中…（第 1 次模型调用）', 'active')
+        triage = revise_mod.split_requests(text, index, cfg,
+                                           log=lambda m: _log(jid, m))
+        for u in triage['unclear']:
+            _log(jid, '待澄清：%s' % u, 'warning')
+        if not triage['items']:
+            raise RuntimeError('没有解析出任何可执行的修改要求'
+                               + ('（%s）' % triage['unclear'][0] if triage['unclear'] else ''))
+
+        by_preview = {e['preview']: e for e in index}
+        if mode == 'rewrite':
+            outline = pipeline.load_json(
+                os.path.join(PLANS, stem + '.outline.json'))
+            doc = pipeline.load_json(os.path.join(PLANS, stem + '.parsed.json'))
+            items = []
+            cap = revise_mod.max_rewrite_pages()
+            rewrote = 0
+            for n, it in enumerate(triage['items'], 1):
+                page = by_preview.get(it['preview']) or {}
+                if page.get('kind') in ('cover', 'toc', 'back'):
+                    items.append(dict(it, status='reject', new=None,
+                                      reason='%s 是模板页，只能微调，不能整页重做'
+                                             % page.get('label')))
+                    continue
+                if page.get('layout') == revise_mod.DIVIDER_LAYOUT:
+                    items.append(dict(it, status='reject', new=None,
+                                      reason='章节分隔页是结构页，没有版式可换 —— '
+                                             '只能微调它的章节名/导语'))
+                    continue
+                if rewrote >= cap:
+                    # 截断必须说出来。`llm` 没有取消接口，一页一次调用最坏 9 分钟，
+                    # 一次做十几页要等一小时且停不下来 —— 所以设上限，
+                    # 但**不能悄悄少做几页**：那会变成「提了意见没反应」。
+                    items.append(dict(it, status='reject', new=None,
+                                      reason='一次最多重做 %d 页（PPTGEN_REVISE_MAX_PAGES）'
+                                             '—— 这一页本次没做，请再提交一次'
+                                             % cap))
+                    continue
+                rewrote += 1
+                _log(jid, '正在重做第 %d 页…（第 %d/%d 条）'
+                     % (it['preview'], n + 1, len(triage['items']) + 1), 'active')
+                new, why = revise_mod.redo_slide(deck, it['preview'], outline, doc,
+                                                it['request'], cfg,
+                                                log=lambda m: _log(jid, m))
+                if new is None:
+                    items.append(dict(it, status='reject', new=None, reason=why))
+                else:
+                    items.append(dict(it, status='warn' if why else 'ok', new=new,
+                                      reason=why if why else '',
+                                      was_layout=page.get('layout'),
+                                      now_layout=new.get('layout')))
+        else:
+            _log(jid, '生成修改方案…（第 2 次模型调用）', 'active')
+            items = revise_mod.propose_patches(deck, triage['items'], cfg,
+                                               log=lambda m: _log(jid, m))
+
+        rid = uuid.uuid4().hex[:8]
+        result = dict(rid=rid, stem=stem, deck=path, mode=mode,
+                      sha=revise_mod.deck_fingerprint(deck),
+                      items=items, unclear=triage['unclear'], page_index=index)
+        try:
+            pipeline.save_json(result, _revision_draft_path(stem, rid))
+        except Exception as e:
+            _log(jid, '草稿落盘失败（不影响本次）：%s' % e, 'warning')
+        ok = [i for i in items if i.get('status') != 'reject']
+        _finish(jid, result=result)
+        _log(jid, '方案就绪：%d 条可应用、%d 条不能应用'
+             % (len(ok), len(items) - len(ok)),
+             'success' if ok else 'warning')
+    except Exception as e:
+        traceback.print_exc()
+        _log(jid, '失败：%s' % e, 'warning')
+        _finish(jid, error='%s: %s' % (type(e).__name__, e))
+
+
+def run_apply(jid: str, deck_arg: str, mode: str, items: list, sha: str = '',
+              rid: str = ''):
+    """阶段二：应用选中的条目 → 重建 → **只重渲改动的页**。
+
+    沿用 `/api/outline` → `/api/generate` 那套 stateless 双阶段的惯例：
+    前端把（可能被用户手改过新值的）方案原样回传，服务端**不重调模型**。
+    """
+    try:
+        cfg = cfg_mod.llm_config()
+        stem = _stem_of(deck_arg)
+        path, deck = _resolve_deck(stem)
+        if deck is None:
+            raise RuntimeError('找不到这份 deck：%s' % deck_arg)
+        stem = _stem_of(path)
+
+        # 接上原来那条流程的日志文件夹（照 run_generate 的做法）。修订的成品会
+        # 以 `-2` 命名归档进去 —— `runlog._copy_in` 同名不覆盖，于是磁盘上
+        # **会**留下多个版本；`run.json` 里的 `artifacts.pptx` 是单槽位，
+        # 读不出「哪份是哪次修订的」，所以另外记一笔台账（`_append_ledger`）。
+        runlog = runlog_mod.RunLog(stem, origin='web', command='revise')
+        side = _read_sidecar(os.path.join(PLANS, stem + '.parsed.json')) or {}
+        if side.get('run_dir') and not runlog.open_at(side['run_dir']):
+            runlog.put('warning', '接不上原流程文件夹，已新建：%s' % side['run_dir'])
+        with JOBS_LOCK:
+            if jid in JOBS:
+                JOBS[jid]['runlog'] = runlog
+        runlog.put('deck_name', stem)
+        if not runlog._data.get('config'):
+            runlog.put('config', runlog_mod.config_snapshot())
+        _log(jid, '本次流程日志：%s' % runlog.dir, 'info')
+
+        # 乐观并发：提案之后 deck 被别的路径改过（又生成了一次），
+        # 就直接拒 —— 否则会把用户刚看到的那份方案套到另一份内容上
+        now = revise_mod.deck_fingerprint(deck)
+        if sha and sha != now:
+            raise RuntimeError('这份 deck 在生成方案之后被改过（可能又生成了一次），'
+                               '请重新生成修改方案')
+
+        bad = revise_mod.check_deck_layouts(deck)
+        if bad:
+            raise RuntimeError(bad)
+
+        _log(jid, '应用 %d 条修改…' % len(items))
+        if mode == 'rewrite':
+            outline = pipeline.load_json(os.path.join(PLANS, stem + '.outline.json'))
+            doc = pipeline.load_json(os.path.join(PLANS, stem + '.parsed.json'))
+            out_deck = copy.deepcopy(deck)
+            # **按顺序增量应用**：先把第 5 页写回，再算第 6 页的禁用版式 ——
+            # 否则「第 5、6 页都重做」会同时选到同一个版式（相邻重复）
+            changed = []
+            for it in items:
+                preview = it.get('preview')
+                new = it.get('new')
+                if isinstance(new, dict) and new.get('layout'):
+                    # **用用户确认过的那一版，不要重跑模型。** 重跑会得到另一个
+                    # 结果 —— 用户在面板上看着 comparison_rows 点了「应用」，
+                    # 拿到的却是别的版式。而且要为此多花一次模型调用。
+                    # （`new` 来自浏览器，所以这里仍要校验。）
+                    if new['layout'] not in revise_mod.known_layouts():
+                        _log(jid, '第 %s 页确认的版式 %r 不认识，跳过'
+                             % (preview, new['layout']), 'warning')
+                        continue
+                    out_deck['slides'][preview - revise_mod.PAGE_OFFSET] = new
+                    changed.append(preview)
+                    continue
+                new, why = revise_mod.redo_slide(out_deck, preview, outline, doc,
+                                                it.get('request') or '', cfg,
+                                                log=lambda m: _log(jid, m))
+                if new is None:
+                    _log(jid, '第 %s 页重做失败：%s' % (preview, why), 'warning')
+                    continue
+                out_deck['slides'][preview - revise_mod.PAGE_OFFSET] = new
+                changed.append(preview)
+        else:
+            out_deck, rep = revise_mod.apply_revision(deck, items,
+                                                      log=lambda m: _log(jid, m))
+            for r in rep['items']:
+                if r['status'] == 'reject':
+                    _log(jid, '第 %s 页未应用：%s' % (r['preview'], r['reason']),
+                         'warning')
+            changed = [r['preview'] for r in rep['items'] if r['status'] != 'reject']
+            if rep.get('outline'):
+                _log(jid, '这些字段会同步回大纲：%s'
+                     % '、'.join(p['field'] for p in rep['outline']))
+
+        if not changed:
+            raise RuntimeError('没有一条可以应用')
+
+        pptx = os.path.join(SAMPLES, '%s.pptx' % stem)
+        template = cfg_mod.template_path()
+
+        def build_qa(spec):
+            build_mod.build(spec, template, pptx, fill_toc=True,
+                            on_log=lambda m: _log(jid, m))
+            return geometry.analyse(pptx)
+
+        # 预演构建：只为看**改动的页**有没有撑破版面。build + 几何约 1–2 秒，
+        # 贵的是渲染（8–10 秒/页），所以每次都能跑。
+        _log(jid, '预演构建（检查改动的页有没有撑破版面）…', 'active')
+        issues = revise_mod.check_by_build(out_deck, build_qa, set(changed))
+        for pg, why in sorted(issues.items()):
+            # 溢出是**可恢复**的，交给现成的 `repair_slide`（它冻结 layout、
+            # 只压短），不要跑 `repair_deck` —— 那会挑**所有**溢出页、
+            # 把用户没让改的页一起重写。
+            _log(jid, '第 %d 页有版面问题，压一下文案：%s' % (pg, '；'.join(why)),
+                 'warning')
+            try:
+                fixed = repair_mod.repair_slide(
+                    out_deck['slides'][pg - revise_mod.PAGE_OFFSET], why, cfg,
+                    log=lambda m: _log(jid, m))
+                out_deck['slides'][pg - revise_mod.PAGE_OFFSET] = fixed
+            except Exception as e:
+                _log(jid, '第 %d 页压文案失败：%s' % (pg, e), 'warning')
+
+        spec_out = os.path.join(PLANS, '%s.deck.revised.json' % stem)
+        pipeline.save_json(out_deck, spec_out)
+        build_mod.build(out_deck, template, pptx, fill_toc=True,
+                        on_log=lambda m: _log(jid, m))
+        rep_final = geometry.analyse(pptx)
+
+        with runlog.stage('render') as st:
+            work = os.path.join(VISUAL, stem)
+            _log(jid, '重渲改动的 %d 页预览…' % len(changed), 'active')
+            shot = _render(pptx, work, out_deck, snap_tag=rid or 'rev',
+                           deck_path=spec_out)
+            st.update(pages=len(shot['pages']), rendered=len(shot['rendered']))
+        _log(jid, '预览图 %d 张（本次重渲 %d 张）'
+             % (len(shot['pages']), len(shot['rendered'])), 'success')
+        # 没渲上的页必须说出来：那些页的图现在与 deck 不一致，而界面、几何检查
+        # 都看不出来。`_render` 已保证它们不会被记成「最新」（下次会重试）。
+        missing = sorted(set(changed) - set(shot['rendered']))
+        if missing:
+            _log(jid, '有 %d 页没能重渲（%s）—— 页面上这几张仍是旧图，'
+                      '检查 officecli 是否可用' % (len(missing), missing), 'warning')
+        if not shot.get('manifest_ok', True):
+            _log(jid, '渲染清单没写进去 —— 下次会整份重渲一遍（约 %d 页）'
+                 % len(shot['pages']), 'warning')
+
+        # 大纲侧要同步：目录条目与封面标题都是**从大纲派生的**（pipeline.py:1529/1535），
+        # 不同步的话用户下一次点「生成」会把刚改的标题静默冲掉。
+        # （重做模式只动正文页，没有大纲侧要同步的东西 —— `rep` 在那个分支里也不存在。）
+        outline_patch = (rep.get('outline') or []) if mode != 'rewrite' else []
+        if outline_patch:
+            opath = os.path.join(PLANS, stem + '.outline.json')
+            try:
+                cur = pipeline.load_json(opath)
+                pipeline.save_json(
+                    revise_mod.apply_outline_patch(cur, outline_patch), opath)
+                _log(jid, '已同步回大纲：%s'
+                     % '、'.join(p['field'] for p in outline_patch))
+            except Exception as e:
+                _log(jid, '同步回大纲失败（%s）—— 下次重新生成会丢掉这几处改动'
+                     % e, 'warning')
+
+        n_led, ledger_why = _append_ledger(stem, dict(rid=rid, mode=mode,
+                                                      changed=changed,
+                                                      deck_sha=now, spec=spec_out,
+                                                      at=time.strftime('%Y-%m-%dT%H:%M:%S')))
+        if ledger_why:
+            _log(jid, '台账没写进去（%s）—— 这份 deck 的人工修改将无法追溯' % ledger_why,
+                 'warning')
+        else:
+            _log(jid, '修订台账已有 %d 笔' % n_led)
+        runlog.note('revise', mode=mode, changed=sorted(changed),
+                    rendered=len(shot['rendered']), spec=spec_out,
+                    error=rep_final['summary']['error'],
+                    warn=rep_final['summary']['warn'])
+        runlog.attach_pptx(pptx)
+        # 「改前」快照的文件名 —— `_render` 在覆盖旧图之前留的底，给前端做
+        # 「改动前 / 改动后」对比用。放在同一个目录里，所以 `/preview/` 端点
+        # 零改动就能取到（它走 `_safe_join(VISUAL, ...)`）。
+        tagname = rid or 'rev'
+        before = {str(pg): 'page-%02d-%s.png' % (pg, tagname)
+                  for pg in shot['rendered']
+                  if os.path.isfile(os.path.join(work, 'page-%02d-%s.png' % (pg, tagname)))}
+
+        _finish(jid, result=dict(
+            name=stem, pptx=pptx, deck=spec_out, deck_live=spec_out,
+            pages=shot['pages'], rendered=shot['rendered'], changed=sorted(changed),
+            before=before,
+            # 前端必须把它合并进 `state.outline` —— `/api/generate` 的输入是
+            # **页面上的那份大纲**，不是磁盘上的。只写盘的话，用户不刷新页面
+            # 直接点「生成 PPT」，刚改的封面标题/目录条目会被覆盖回去。
+            outline_patch=outline_patch,
+            page_index=revise_mod.build_page_index(out_deck),
+            summary=rep_final['summary'], slides=rep_final['slides'],
+            download='/download/%s.pptx' % urllib.parse.quote(stem)))
     except Exception as e:
         traceback.print_exc()
         _log(jid, '失败：%s' % e, 'warning')
@@ -335,6 +700,65 @@ def _write_confirmed_outline(outline: dict, name: str) -> str:
     return path
 
 
+def _deck_candidates(stem: str) -> list[str]:
+    """这份 deck 可能落在哪几个文件上。
+
+    修订产物排最前：它是**最近一次按页修订的结果**，也是渲染清单里记的那份。
+    不列进来的话，一旦渲染清单丢了（`out/visual` 被清过），`_resolve_deck`
+    就会退回原始 deck —— 用户刚改的那些内容会**静默消失**。
+    """
+    return [os.path.join(PLANS, stem + '.deck.revised.json'),
+            os.path.join(PLANS, stem + '.deck.repaired.json'),
+            os.path.join(PLANS, stem + '.deck.json')]
+
+
+def _rendered_deck(stem: str) -> str | None:
+    """渲染清单里记的那份 deck 路径 —— 这些预览图**就是从它渲出来的**。
+
+    这是「哪份 deck 是 live」的**权威**来源：磁盘上可能同时躺着
+    `deck.json` 与 `deck.repaired.json`，而较新的那份未必是渲染过的那份
+    （实测 `Dify_介绍与实战` 的两份差了 50 分钟，较新那份从未被渲染）。
+    """
+    try:
+        with open(os.path.join(VISUAL, stem, MANIFEST), 'r', encoding='utf-8') as f:
+            got = json.load(f)
+    except (OSError, ValueError):
+        return None
+    p = got.get('deck') if isinstance(got, dict) else None
+    return p if isinstance(p, str) and p and os.path.isfile(p) else None
+
+
+def _resolve_deck(stem: str) -> tuple[str | None, dict | None]:
+    """`<name>` → 实际该改的那份 deck：(路径, 内容)；都没有则 (None, None)。
+
+    优先渲染清单里记的那份（`_rendered_deck`）—— 那才是屏幕上这些图的来源，
+    修订打歪的后果是「我只改了第 5 页标题，第 8、11 页的文案也一起变回去了」。
+
+    拿不到清单时退回「两份里 mtime 较新的那份」。这只是**兜底**：`run_generate`
+    的顺序是先存 plain、再跑修复、存 repaired，所以正常跑完时 repaired 天然更新；
+    但若有一次规划跑完、修复阶段没跑成（`run.py plan` 单独跑、或修复中途崩了），
+    plain 就会更新 —— 而它从未被渲染过，按它修订会让没改动的页图文不符。
+    这也是前端要把 `deck_live` 回传的原因：那条路才是确定的。
+    """
+    recorded = _rendered_deck(stem)
+    good = [p for p in _deck_candidates(stem) if os.path.isfile(p)]
+    if recorded and recorded not in good:
+        good.insert(0, recorded)
+    if not good:
+        return None, None
+    path = recorded or (max(good, key=lambda p: os.stat(p).st_mtime_ns)
+                        if len(good) > 1 else good[0])
+    try:
+        return path, pipeline.load_json(path)
+    except (ValueError, OSError) as e:
+        print('  [warn] 读不了 deck %s：%s' % (path, e))
+        return None, None
+
+
+def _revisions_path(stem: str) -> str:
+    return os.path.join(PLANS, stem + '.revisions.json')
+
+
 def _officecli_ok() -> bool:
     from pptgen.qa import visual
     return bool(visual.find_officecli())
@@ -349,61 +773,216 @@ def _preview_sig() -> str:
     return '%dx%d' % (w, h)
 
 
-def _drop_stale_renders(work: str, pptx: str) -> None:
-    """deck 换了就把上一份的渲染图清掉。
+# ── 按页渲染指纹 ────────────────────────────────────────────────
+# 这一整块只为一件事：**改一页只该重渲那一页**。
+#
+# 早先的指纹是**整目录级**的（`.pptx-stamp` 里一行 `mtime:size:分辨率`）：pptx 一变
+# 就把所有 `page-*.png` 删掉重来。而按页修订每次都要 `build.build()` 全量重建
+# pptx（build.py:179-229 没有增量能力），于是「改一页」= 重渲 18 页 ≈ 3 分钟
+# （实测每页 8–10 秒，`config.py:142` 的注释也记着这个数）。
+#
+# 现在按页算，而且算的是**这一页的像素由什么决定**（`_page_payload`），不再是
+# pptx 文件的时间戳 —— 后者回答的是「整份 deck 有没有动」，前者才是
+# 「这一页要不要重画」。两者在「只改一页」时差 1 页 vs 18 页。
+#
+# 当年那次事故（11:25 跑完，页面上 17 张预览全是 09:23 那一版的 15 页内容，
+# 用户按预览里的页码反馈问题、指的根本不是这一版）的教训在这里以另一种形式
+# 保留：**页数变少时多出来的旧图必须删**（见 `_render_plan` 的 `drop`），
+# 否则页面上会多出几张上一版的图。
+_PAGE_PNG_RE = re.compile(r'^page-(\d\d)\.png$')
+MANIFEST = '.pages.json'
 
-    `work` 是按 deck 名分的（`out/visual/<stem>/`），而同一个源文档反复生成时
-    deck 名不变 —— 于是下面那句「已有 page-NN.png 就跳过渲染」会把**上一次**的图
-    留在原地：页码对不上、页数不同时还会多出几张旧图。
 
-    踩过：11:25 那次跑完，页面上 17 张预览全是 09:23 那一版的 15 页内容，
-    用户按预览里的页码反馈问题，指的根本不是这一版。**预览看着成功，其实是旧的。**
+def _page_payload(spec: dict, pg: int, n: int):
+    """这一页渲染出来的像素由什么决定。
 
-    指纹里还带着渲染配方（`_preview_sig`）：pptx 没动、但我们改了分辨率时，
-    只看 mtime+size 会认为「没变化」而留着旧的 1280 图 —— 页面上看不出区别，
-    只是糊一点，于是「提高了清晰度」这件事悄悄没生效。
+        pg == 1        封面：标题 + **生效后的**副标题
+        pg == 2        目录：toc
+        3 <= pg < n    正文/章节分隔页：`spec['slides'][pg-3]`
+        pg == n        封底：模板原样，只有「它是封底」这一件事
     """
-    st = os.stat(pptx)
-    stamp = '%d:%d:%s' % (st.st_mtime_ns, st.st_size, _preview_sig())
-    mark = os.path.join(work, '.pptx-stamp')
-    try:
-        with open(mark, 'r', encoding='utf-8') as f:
-            if f.read().strip() == stamp:
-                return
-    except OSError:
-        pass
-    for f in os.listdir(work):
-        if f == 'contact-sheet.png' or (f.startswith('page-') and f.endswith('.png')):
-            try:
-                os.remove(os.path.join(work, f))
-            except OSError:
-                pass
-    try:
-        with open(mark, 'w', encoding='utf-8') as f:
-            f.write(stamp)
-    except OSError:
-        pass    # 写不了标记只是下次多渲染一遍，不该让整条链路失败
+    if pg == 1:
+        # 副标题必须用**生效后**的值：deck.json 里通常没有 `subtitle`，
+        # `build.fill_cover` 会兜底成 `today_cn()`（build.py:212）。只哈希
+        # `spec.get('subtitle')` 的话，兜底值变了而指纹没变 —— 与当年
+        # 「改了分辨率旧图不重渲」是同一类静默失效。
+        # （`today_cn()` 是**月份**粒度，所以这个兜底值跨月才会变。）
+        return {'cover': spec.get('title') or '',
+                'subtitle': spec.get('subtitle') or build_mod.today_cn()}
+    if pg == 2:
+        return {'toc': spec.get('toc') or []}
+    if pg == n:
+        return {'back': True}
+    slides = spec.get('slides') or []
+    i = pg - revise_mod.PAGE_OFFSET
+    if not (0 <= i < len(slides)):
+        return {'missing': pg}
+    # `page` 必须剔掉：`build.build()` 会**原地**往每个 slide 写 `sl['page'] = i+3`
+    # （build.py:194），于是「跑过一次 build 的内存 deck」有它、刚 load 进来的
+    # 盘上那份也可能有或没有。它是派生值、不是内容，进了指纹就会让同内容的两份
+    # spec 算出不同指纹，白白整目录重渲一遍。
+    return {k: v for k, v in slides[i].items()
+            if k != 'page' and not k.startswith('_')}
 
 
-def _render(pptx: str, work: str) -> list[str]:
+def _page_digest(spec: dict, pg: int, n: int, sig: str) -> str:
+    blob = json.dumps(_page_payload(spec, pg, n), ensure_ascii=False,
+                      sort_keys=True, separators=(',', ':'))
+    # 分辨率（`sig`）必须进指纹：pptx 没动、我们改了 `PPTGEN_PREVIEW_WIDTH` 时，
+    # 只看内容会认为「没变化」而留着旧的 1280 图 —— 页面上看不出区别，只是糊一点，
+    # 于是「提高了清晰度」这件事悄悄没生效。`tests/test_runlog.py:291` 钉的就是这条。
+    return hashlib.sha1(('%s|%s' % (blob, sig)).encode('utf-8')).hexdigest()
+
+
+def _load_manifest(work: str) -> dict:
+    try:
+        with open(os.path.join(work, MANIFEST), 'r', encoding='utf-8') as f:
+            got = json.load(f)
+        return got if isinstance(got, dict) else {}
+    except (OSError, ValueError):
+        return {}      # 没有 / 坏了 / 不是对象 → 当「全部过期」，自愈
+
+
+def _save_manifest(work: str, m: dict) -> bool:
+    """原子写：崩在中途也不能留下半份清单（那会让下次白渲一整遍）。
+
+    返回是否写成功。**失败必须能看见** —— 写不进去的后果是下一次、再下一次
+    都整份重渲（实测一次 18 页 ≈ 220 秒），而日志上只表现为「怎么又渲了 18 页」，
+    完全看不出原因。
+    """
+    tmp = os.path.join(work, MANIFEST + '.tmp')
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(m, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, os.path.join(work, MANIFEST))
+        return True
+    except OSError as e:
+        print('  [warn] 写渲染清单失败：%s' % e)
+        return False
+
+
+def _render_plan(work: str, digests: dict[int, str], manifest: dict, *,
+                 sig: str = '', template_sha: str = '') -> dict:
+    """谁该渲、谁该删、谁保留 —— **纯函数**（只看目录列表，不调 officecli）。
+
+    做成纯函数是为了让「谁该重渲」能在单测里全覆盖：渲染每页要 8–10 秒，
+    而这段判断正是增量渲染的正确性所在，不能只靠肉眼验收。
+
+    → {'render': [pg...], 'drop': [文件名...], 'keep': [文件名...],
+       'stale_contact_sheet': bool, 'full_reason': str}
+    """
+    old = manifest.get('pages') if isinstance(manifest.get('pages'), dict) else {}
+    full_reason = ''
+    if not old:
+        full_reason = '没有渲染清单（首次渲染，或清单没写进去）'
+    elif manifest.get('sig') != sig:
+        full_reason = '渲染配方变了（%s → %s）' % (manifest.get('sig'), sig)
+    elif manifest.get('template_sha') != template_sha:
+        full_reason = '模板换过了'
+    if full_reason:
+        old = {}
+    try:
+        have = {int(m.group(1)): m.group(0)
+                for m in (_PAGE_PNG_RE.match(f) for f in os.listdir(work)) if m}
+    except OSError:
+        have = {}
+
+    render: list[int] = []
+    keep: list[str] = []
+    for pg, dg in sorted(digests.items()):
+        if pg in have and old.get(str(pg)) == dg:
+            keep.append('page-%02d.png' % pg)
+        else:
+            render.append(pg)
+    # digests 里没有的页码 = 这一版页数变少了。**旧图必须删**，否则页面上会多出
+    # 几张上一版的图，用户按预览页码反馈时又指错页。
+    drop = [f for pg, f in sorted(have.items()) if pg not in digests]
+    return dict(render=render, drop=drop, keep=keep,
+                stale_contact_sheet=bool(render or drop),
+                full_reason=full_reason)
+
+
+def _render(pptx: str, work: str, spec: dict, *, snap_tag: str = '',
+            deck_path: str = '') -> dict:
+    """渲染预览图。→ {'pages': [...], 'rendered': [pg...], 'dropped': [...]}。
+
+    按页指纹决定该重渲哪些页；没变的页**连碰都不碰**（`page-NN.png` 的 mtime 不变）。
+
+    `snap_tag` 非空时，被重渲的页在渲染**之前**先把旧图复制成
+    `page-NN-<snap_tag>.png` —— 「改前/改后」对比要用它。快照就放同一个目录：
+    `/preview/` 走 `_safe_join(VISUAL, rest)`（server.py 的路由），取它零改动。
+    """
     from pptx import Presentation
     from pptgen.qa import visual
-    if not visual.find_officecli():
-        return []
     os.makedirs(work, exist_ok=True)
-    _drop_stale_renders(work, pptx)
-    w, h = cfg_mod.preview_size()
     n = len(Presentation(pptx).slides)
-    got = []
-    for pg in range(1, n + 1):
-        out = os.path.join(work, 'page-%02d.png' % pg)
-        if not os.path.isfile(out):
-            visual.render_pages(pptx, work, [pg], native=True, width=w, height=h)
+    sig = _preview_sig()
+    digests = {pg: _page_digest(spec, pg, n, sig) for pg in range(1, n + 1)}
+    plan = _render_plan(work, digests, _load_manifest(work), sig=sig,
+                        template_sha=runlog_mod.sha256(cfg_mod.template_path()) or '')
+
+    if not visual.find_officecli():
+        return dict(pages=[], rendered=[], dropped=[])
+
+    w, h = cfg_mod.preview_size()
+    if plan['full_reason']:
+        # 为什么整份要重渲，必须说出来 —— 否则日志上只有「怎么又渲了 18 页」
+        print('  [render] 整份重渲：%s' % plan['full_reason'])
+    rendered: list[int] = []
+    for pg in plan['render']:
+        fname = 'page-%02d.png' % pg
+        out = os.path.join(work, fname)
+        if snap_tag and os.path.isfile(out):
+            # 先留底再覆盖：指纹一变，旧图就再也拿不回来了
+            try:
+                shutil.copyfile(out, os.path.join(
+                    work, 'page-%02d-%s.png' % (pg, snap_tag)))
+            except OSError:
+                pass
+        visual.render_pages(pptx, work, [pg], native=True, width=w, height=h)
         if os.path.isfile(out):
-            got.append('page-%02d.png' % pg)
-        if pg == 1:
-            visual.render_contact_sheet(pptx, os.path.join(work, 'contact-sheet.png'))
-    return got
+            rendered.append(pg)
+    for f in plan['drop']:
+        try:
+            os.remove(os.path.join(work, f))
+        except OSError:
+            pass
+
+    # 联系表要整份都渲过才可信。任何一页变了就先让它失效，别留一张跟当前
+    # deck 不一致的联系表 —— 那正是「预览看着成功，其实是旧的」那一类错误。
+    sheet = os.path.join(work, 'contact-sheet.png')
+    if plan['stale_contact_sheet']:
+        try:
+            os.remove(sheet)
+        except OSError:
+            pass
+    if not os.path.isfile(sheet) and 1 in rendered:
+        visual.render_contact_sheet(pptx, sheet)
+
+    # 清单只记**确实是最新**的那些页：
+    #   · 本次渲成功了的（`fresh`）
+    #   · 本次压根不需要渲的（digest 本来就匹配）
+    # **渲失败的那几页绝不能记** —— 记了就等于声称「这页的图是最新的」，
+    # 它再也不会被重渲，用户会一直看着旧图，而几何检查、日志全都正常。
+    # 这与 `.pptx-stamp` 时代那次「预览看着成功，其实是旧的」是同一类错误。
+    fresh = set(rendered)
+    attempted = set(plan['render'])
+    pages_map: dict[str, str] = {}
+    for pg, dg in digests.items():
+        if not os.path.isfile(os.path.join(work, 'page-%02d.png' % pg)):
+            continue
+        if pg in fresh or pg not in attempted:
+            pages_map[str(pg)] = dg
+    # 清单里的 `deck` 回答「这些图到底是哪份 spec 渲的」—— `_resolve_deck` 用它
+    # 兜底：磁盘上可能同时躺着 deck.json / deck.repaired.json / deck.revised.json，
+    # 较新的那份未必是渲染过的那份（实测有差 50 分钟的）。
+    man_ok = _save_manifest(work, dict(
+        sig=sig, template_sha=runlog_mod.sha256(cfg_mod.template_path()) or '',
+        n=n, deck=deck_path or '', pages=pages_map))
+    pages = ['page-%02d.png' % pg for pg in sorted(digests)
+             if os.path.isfile(os.path.join(work, 'page-%02d.png' % pg))]
+    return dict(pages=pages, rendered=rendered, dropped=plan['drop'],
+                full_reason=plan['full_reason'], manifest_ok=man_ok)
 
 
 def run_outline(jid: str, src: str, data: bytes | None = None,
@@ -512,7 +1091,12 @@ def _write_sidecar(stem: str, runlog, src: str, origin: str, name: str):
 
 # 中间产物的后缀。`os.path.splitext` **只剥一层** —— `x.parsed.json` 会得到
 # `x.parsed`，拿去拼 sidecar 就永远找不到文件（踩过）。
-_STAGE_SUFFIX = re.compile(r'\.(parsed|outline|deck|repaired)$')
+# `.revised` 与 `.revise-<rid>` 是按页修订的两份产物（落盘的修订稿、方案草稿），
+# **必须一起列进来**：漏了它们的后果不是「找不到文件」那么显眼 ——
+# `_stem_of('x.deck.revised.json')` 会返回 `x.deck.revised`，于是渲染目录、
+# 台账、日志文件夹全部换成另一套名字（`out/visual/x.deck.revised/`、
+# `x.deck.revised.revisions.json`），表现为「预览图整份重渲了、台账却像没写」。
+_STAGE_SUFFIX = re.compile(r'\.(parsed|outline|deck|repaired|revised|revise-[0-9a-f]+)$')
 
 
 def _stem_of(path: str) -> str:
@@ -709,6 +1293,42 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({k: v for k, v in j.items() if not k.startswith('_')
                                and k != 'runlog'})
 
+        if p.startswith('/api/deck/'):
+            # 前端的卡片标签、「要不要提示会丢人工修改」、以及提案阶段的页码表都靠这一份。
+            # 页码映射只在 revise.build_page_index 里实现一次，前端只显示不算。
+            stem = _stem_of(urllib.parse.unquote(p[len('/api/deck/'):]))
+            if not _safe_join(PLANS, stem + '.deck.json'):
+                return self._json({'error': 'bad name'}, 400)
+            path, deck = _resolve_deck(stem)
+            if deck is None:
+                return self._json({'error': 'no such deck'}, 404)
+            revs: list = []
+            try:
+                if os.path.isfile(_revisions_path(stem)):
+                    revs = pipeline.load_json(_revisions_path(stem)).get('revisions') or []
+            except (ValueError, OSError):
+                pass            # 台账读不了不该让整页打不开
+            return self._json(dict(
+                name=stem, deck=path, sha=revise_mod.deck_fingerprint(deck),
+                title=deck.get('title') or '', toc=deck.get('toc') or [],
+                page_index=revise_mod.build_page_index(deck),
+                revisions=revs))
+
+        if p.startswith('/api/revision/'):
+            # 取回一份修订方案草稿。存在的理由是**刷新页面后还能接上**：
+            # job 只活在内存里，轮询一断前端就什么都拿不到了。
+            rid = re.sub(r'[^\w-]', '', p.rsplit('/', 1)[-1])[:32]
+            if not rid:
+                return self._json({'error': 'bad id'}, 400)
+            try:
+                hits = [f for f in os.listdir(PLANS)
+                        if f.endswith('.revise-%s.json' % rid)]
+            except OSError:
+                hits = []
+            if not hits:
+                return self._json({'error': 'no such revision'}, 404)
+            return self._json(pipeline.load_json(os.path.join(PLANS, hits[0])))
+
         if p.startswith('/preview/'):
             f = _safe_join(VISUAL, p[len('/preview/'):])
             return (self._file(f, 'image/png') if f
@@ -804,6 +1424,35 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=run_generate,
                              args=(jid, outline, parsed_path, name, rounds),
                              daemon=True).start()
+            return self._json({'job_id': jid})
+
+        if p == '/api/revise':
+            deck = (body.get('deck') or '').strip()
+            mode = body.get('mode') or 'patch'
+            text = (body.get('text') or '').strip()
+            if not deck:
+                return self._json({'error': '缺少 deck'}, 400)
+            if not text:
+                return self._json({'error': '请写下要改什么'}, 400)
+            if mode not in ('patch', 'rewrite'):
+                return self._json({'error': 'mode 只能是 patch 或 rewrite'}, 400)
+            jid = _job_new()
+            threading.Thread(target=run_revise, args=(jid, deck, mode, text),
+                             daemon=True).start()
+            return self._json({'job_id': jid})
+
+        if p == '/api/revise/apply':
+            deck = (body.get('deck') or '').strip()
+            mode = body.get('mode') or 'patch'
+            items = body.get('items')
+            if not deck:
+                return self._json({'error': '缺少 deck'}, 400)
+            if not isinstance(items, list) or not items:
+                return self._json({'error': '没有要应用的条目'}, 400)
+            jid = _job_new()
+            threading.Thread(target=run_apply,
+                             args=(jid, deck, mode, items, body.get('sha') or '',
+                                   body.get('rid') or ''), daemon=True).start()
             return self._json({'job_id': jid})
 
         return self._json({'error': 'not found'}, 404)

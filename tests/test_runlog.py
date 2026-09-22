@@ -284,7 +284,9 @@ class TestServerPathHelpers(_Base):
         """`splitext` 只剥一层 —— `x.deck.repaired.json` 曾是 `x.deck`。"""
         s = self.server
         for path in ('x.parsed.json', 'x.outline.json', 'x.deck.json',
-                     'x.deck.repaired.json'):
+                     'x.deck.repaired.json', 'x.deck.revised.json',
+                     'x.revise-3f9c2a1b.json',
+                     'x.deck.revised.revise-3f9c2a1b.json'):
             self.assertEqual(s._stem_of('out/plans/' + path), 'x', path)
         self.assertEqual(s._stem_of('out/plans/plain.json'), 'plain')
 
