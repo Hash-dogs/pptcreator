@@ -20,7 +20,16 @@ const state = {
   statusMsg: '',
   previewUrls: [],       // 逐页预览图的 URL，弹层翻页要用（deck 名出了
                          // showResult 就没了，所以必须存下来）
+  result: null,          // 整个生成结果（按页修订要用 deck_live / page_index，
+                         // 这些同样出了 showResult 就没了）
+  pageMeta: [],          // 与 previewUrls 平行的页面清单，来自服务端的 page_index。
+                         // 页码映射（预览 N ↔ slides[N-3]）只在服务端算一次，
+                         // 这里只显示不算 —— 前端再算一遍就是第二处真相。
   lbIndex: -1,           // 弹层当前页码（0 基）；-1 = 没开
+  lbBefore: false,       // 弹层是否正在看「改动前」那一帧
+  picked: {},            // 预览页号 → 是否勾选（用于「引用选中的页」）
+  revise: null,          // 当前的修改方案（服务端返回的 items + sha）
+  beforeUrls: {},        // 预览页号 → 「改动前」快照的 URL
 };
 
 const MAX_FILES = 8;
@@ -548,20 +557,55 @@ function showResult(r) {
 
   const g = $('previewGrid');
   const pages = r.pages || [];
+  // 按页修订要用的东西（deck_live / page_index）出了这里就没了，存下来
+  state.result = r;
+  state.pageMeta = r.page_index || [];
+  state.picked = {};
+  // 「改动前」快照的文件名（apply 的结果里才有），弹层用来做对比
+  state.beforeUrls = {};
+  const before = r.before || {};
+  const name = encodeURIComponent(r.name);
+  Object.keys(before).forEach((pg) => {
+    state.beforeUrls[+pg] = '/preview/' + name + '/' + encodeURIComponent(before[pg]);
+  });
   // 缩略图用的就是全尺寸原图（没有单独的缩略图接口），所以点开放大
   // 是纯本地行为，不会再发一次请求 —— 弹层直接复用这些 URL。
-  state.previewUrls = pages.map((p) =>
-    '/preview/' + encodeURIComponent(r.name) + '/' + encodeURIComponent(p));
+  // **重渲过的那几页要带版本号**：URL 不变而图变了，浏览器会给旧图。
+  const fresh = new Set((r.rendered || []).map(Number));
+  const bust = Date.now();
+  state.previewUrls = pages.map((p, i) =>
+    '/preview/' + name + '/' + encodeURIComponent(p)
+    + (fresh.has(i + 1) ? '?v=' + bust : ''));
   if (pages.length) {
-    g.innerHTML = pages.map((p, i) =>
-      '<div class="preview-card" data-idx="' + i + '" title="点击放大">'
-      + '<img loading="lazy" src="' + state.previewUrls[i] + '"'
-      + ' alt="第 ' + (i + 1) + ' 页">'
-      + '<span>第 ' + (i + 1) + ' 页</span></div>').join('');
+    g.innerHTML = pages.map((p, i) => {
+      const meta = state.pageMeta[i] || {};
+      // 卡片上写的就是服务端算好的 label（「预览 05 · 正文 03」）——
+      // 用户说「第 5 页」时指的那个数，必须和这里显示的是同一个。
+      // 没有 page_index（老结果、拿不到 deck）时退回序号，不至于没得看。
+      const label = meta.label || ('第 ' + (i + 1) + ' 页');
+      const tip = [label, meta.layout, meta.headline].filter(Boolean).join(' · ');
+      const changed = (r.changed || []).indexOf(i + 1) >= 0;
+      // 模板页（封面/目录/封底）也能微调，只是不能重做 —— 不用特别标出来，
+      // 提交后服务端会按类型给出准确的说法。
+      return '<div class="preview-card' + (meta.kind ? ' k-' + esc(meta.kind) : '')
+        + (changed ? ' changed' : '') + '" data-idx="' + i + '"'
+        + ' data-kind="' + esc(meta.kind || '') + '" title="' + esc(tip) + '">'
+        + '<label class="pick" title="勾选后可用「引用选中的页」">'
+        + '<input type="checkbox" data-pick="' + (i + 1) + '"></label>'
+        + (meta.layout ? '<span class="layout-tag">' + esc(meta.layout) + '</span>' : '')
+        + '<img loading="lazy" src="' + state.previewUrls[i] + '"'
+        + ' alt="' + esc(label) + '">'
+        + '<span>' + esc(label) + '</span></div>';
+    }).join('');
   } else {
     g.innerHTML = '<p class="hint">没有渲染图 —— 检查 officecli 是否可用'
       + '（缺了它不影响 pptx 本身，只是看不到逐页预览）。</p>';
   }
+  // 拿得到 deck 才能按页改（CLI 产物、历史结果可能没有）
+  $('revisePanel').classList.toggle('hidden', !r.deck_live);
+  $('diffPanel').classList.add('hidden');
+  state.revise = null;
+  renderPickedHint();
 }
 
 /* ── 预览弹层 ─────────────────────────────────────────────── */
@@ -581,9 +625,18 @@ function openLightbox(idx) {
 function paintLightbox() {
   const n = state.previewUrls.length;
   const i = state.lbIndex;
-  $('lbImg').src = state.previewUrls[i];
-  $('lbImg').alt = '第 ' + (i + 1) + ' 页';
-  $('lbPage').textContent = '第 ' + (i + 1) + ' / ' + n + ' 页';
+  const pg = i + 1;
+  const b = state.beforeUrls[pg];
+  // 改动过的页才有「改前」那一帧；有就显示切换按钮，没有就藏起来 ——
+  // 而不是显示一个点了没反应的按钮
+  const btn = $('lbToggle');
+  btn.classList.toggle('hidden', !b);
+  if (!b) state.lbBefore = false;
+  $('lbImg').src = (state.lbBefore && b) ? b : state.previewUrls[i];
+  $('lbImg').alt = '第 ' + pg + ' 页' + (state.lbBefore ? '（改动前）' : '');
+  btn.textContent = state.lbBefore ? '看改动后' : '看改动前';
+  $('lbPage').textContent = '第 ' + pg + ' / ' + n + ' 页'
+    + (b ? (state.lbBefore ? ' · 改动前' : ' · 改动后') : '');
 }
 
 function stepLightbox(d) {
@@ -596,20 +649,32 @@ function stepLightbox(d) {
 
 function closeLightbox() {
   state.lbIndex = -1;
+  state.lbBefore = false;
   $('lightbox').classList.add('hidden');
   // 清掉 src，免得下次打开时先闪一下上一张
   $('lbImg').removeAttribute('src');
 }
 
 $('previewGrid').onclick = (e) => {
+  // 勾选框是卡片上的另一个控件：点它不该开弹层。（卡片上唯一能点的
+  // 「选中」入口就是这个 —— 不改那套键盘翻页逻辑，它比选中功能更值钱。）
+  if (e.target.closest('.pick')) return;
   const card = e.target.closest('.preview-card');
   if (!card) return;
   openLightbox(Number(card.dataset.idx));
 };
 
+$('previewGrid').onchange = (e) => {
+  const box = e.target.closest('input[data-pick]');
+  if (!box) return;
+  state.picked[+box.dataset.pick] = box.checked;
+  renderPickedHint();
+};
+
 $('lbClose').onclick = closeLightbox;
 $('lbPrev').onclick = () => stepLightbox(-1);
 $('lbNext').onclick = () => stepLightbox(1);
+$('lbToggle').onclick = () => { state.lbBefore = !state.lbBefore; paintLightbox(); };
 
 // 点图片本身不关，点四周的背景才关
 $('lightbox').onclick = (e) => {
@@ -623,6 +688,211 @@ document.onkeydown = (e) => {
   else if (e.key === 'ArrowRight') { stepLightbox(1); }
   else { return; }
   e.preventDefault();
+};
+
+/* ── 按页修改 ─────────────────────────────────────────────── */
+/* 一个输入框说多个页面要改什么；顶部一个开关决定**整框**按哪种模式走
+ * （服务端据此分派：patch = 只改字段、版式不变；rewrite = 整页重做、可换版式）。
+ *
+ * 「生成修改方案」只提案、不落盘 —— 用户逐条看过（标量新值还能直接手改）
+ * 再点「应用」。这是这一整套设计里最关键的一步：自然语言改稿最容易崩的地方
+ * 就是「它到底动了哪几个字」，所以 diff 必须挡在落盘之前。
+ */
+function pickedPages() {
+  return Object.keys(state.picked).filter((k) => state.picked[k])
+    .map(Number).sort((a, b) => a - b);
+}
+
+function renderPickedHint() {
+  const got = pickedPages();
+  $('pickedHint').textContent = got.length ? ('已勾选 ' + got.join('、') + ' 页') : '';
+}
+
+function reviseMode() {
+  const el = document.querySelector('input[name="reviseMode"]:checked');
+  return el ? el.value : 'patch';
+}
+
+function headlineOf(sl) {
+  if (!sl) return '';
+  if (sl.title) return sl.title;
+  const flat = (v) => (Array.isArray(v) ? v.map(flat).join('')
+    : (v && typeof v === 'object' ? Object.keys(v).filter((k) => !['hl', 'size', 'bold', 'color'].includes(k)).map((k) => flat(v[k])).join('') : String(v == null ? '' : v)));
+  for (const k of ['lines', 'quote', 'body', 'claim', 'lead']) {
+    if (sl[k]) { const t = flat(sl[k]).trim(); if (t) return t; }
+  }
+  return '';
+}
+
+$('btnQuote').onclick = () => {
+  const got = pickedPages();
+  if (!got.length) return setStatus('先在预览图上勾选要改的页', false, 'warn');
+  const ta = $('reviseText');
+  ta.value = (ta.value.trim() ? ta.value.replace(/\s+$/, '') + '\n' : '')
+    + '第 ' + got.join('、') + ' 页：';
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+};
+
+$('btnRevise').onclick = async () => {
+  if (state.busy) return;
+  const text = $('reviseText').value.trim();
+  if (!text) return setStatus('先写下要改什么', false, 'warn');
+  const deck = state.result && state.result.deck_live;
+  if (!deck) return setStatus('这份结果没有可修改的 deck', false, 'warn');
+
+  $('btnRevise').disabled = true;
+  clearJob();
+  setStatus('正在理解你的要求并生成方案…', true);
+  try {
+    const { job_id } = await api('/api/revise',
+      { deck: deck, mode: reviseMode(), text: text });
+    const job = await poll(job_id);
+    if (job.error) throw new Error(job.error);
+    showDiff(job.result);
+    setStatus('方案已生成 —— 逐条确认后点「应用选中的修改」');
+  } catch (e) {
+    setError('生成方案失败：' + e.message);
+  } finally {
+    $('btnRevise').disabled = false;
+  }
+};
+
+function diffRow(it, i) {
+  const rej = it.status === 'reject';
+  const page = state.pageMeta[it.preview - 1] || {};
+  const label = page.label || ('第 ' + it.preview + ' 页');
+  const badge = rej ? '<span class="badge err">不能应用</span>'
+    : it.status === 'warn' ? '<span class="badge warn">有提醒</span>'
+      : '<span class="badge ok">可直接应用</span>';
+  let body = '';
+  if (it.new) {
+    body += '<div class="diff-line">版式 <code>' + esc(it.was_layout || page.layout || '?')
+      + '</code> → <code>' + esc(it.new.layout || '?') + '</code></div>'
+      + '<div class="diff-line">新大字：<ins>' + esc(headlineOf(it.new) || '（无）')
+      + '</ins></div>';
+  }
+  (it.changes || []).forEach((c, j) => {
+    // 标量新值可以手改（改不了的那种是列表/富文本，一个 input 装不下）
+    const editable = typeof c.after === 'string' && c.after.length <= 80;
+    body += '<div class="diff-line"><code>' + esc(c.path) + '</code>'
+      + '<del>' + esc(c.before) + '</del>'
+      + (editable
+        ? '<input class="diff-val" data-item="' + i + '" data-op="' + j
+          + '" value="' + esc(c.after) + '">'
+        : '<ins>' + esc(c.after) + '</ins>')
+      + (c.why ? '<small>' + esc(c.why) + '</small>' : '') + '</div>';
+  });
+  if (it.reason) body += '<div class="diff-why">' + esc(it.reason) + '</div>';
+  return '<div class="diff-row' + (rej ? ' reject' : '') + '">'
+    + '<div class="diff-head">'
+    + '<label class="pick"><input type="checkbox" data-accept="' + i + '"'
+    + (rej ? ' disabled' : ' checked') + '></label>'
+    + '<strong>' + esc(label) + '</strong>' + badge + '</div>'
+    + '<div class="diff-req">「' + esc(it.quote || it.request || '') + '」</div>'
+    + body + '</div>';
+}
+
+function showDiff(res) {
+  state.revise = res;
+  const items = res.items || [];
+  const ok = items.filter((x) => x.status !== 'reject').length;
+  $('diffMeta').textContent = ok + ' 条可应用 / 共 ' + items.length + ' 条'
+    + ((res.unclear || []).length ? '，另有 ' + res.unclear.length + ' 条待澄清' : '')
+    + '（' + (res.mode === 'rewrite' ? '整页重做' : '小范围修改') + '）';
+  $('diffList').innerHTML = items.map(diffRow).join('')
+    + (res.unclear || []).map((u) => '<div class="diff-row reject">'
+      + '<div class="diff-head"><span class="badge warn">待澄清</span></div>'
+      + '<div class="diff-why">' + esc(u) + '</div></div>').join('');
+  $('diffPanel').classList.remove('hidden');
+  $('diffPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function collectAccepted() {
+  const out = [];
+  const items = (state.revise && state.revise.items) || [];
+  document.querySelectorAll('#diffList input[data-accept]').forEach((box) => {
+    if (!box.checked) return;
+    const it = items[+box.dataset.accept];
+    if (!it) return;
+    const item = { who: +box.dataset.accept, preview: it.preview,
+                   request: it.request, mode: it.mode };
+    if (it.new) item.new = it.new;              // 整页重做：把确认过的那一版带回去
+    if (it.ops) item.ops = JSON.parse(JSON.stringify(it.ops));
+    out.push(item);
+  });
+  // 面板上被手改过的新值以用户为准。**按条目下标找，不能按页码找** ——
+  // 同一页可以有多条意见（「标题压短；那条说明也改短」），按页码会张冠李戴。
+  document.querySelectorAll('#diffList input.diff-val').forEach((el) => {
+    const item = out.find((x) => x.who === +el.dataset.item);
+    if (item && item.ops && item.ops[+el.dataset.op]) {
+      item.ops[+el.dataset.op].value = el.value;
+    }
+  });
+  out.forEach((x) => { delete x.who; });
+  return out;
+}
+
+/* 把服务端报出来的大纲补丁合并回页面上这份大纲。
+ *
+ * 为什么必须做：`/api/generate` 的输入是**页面上的 `state.outline`**
+ * （见 btnGenerate），不是磁盘上那份。服务端虽然已经把封面标题/目录条目
+ * 写回了 outline.json，但用户不刷新页面就不会重新读盘 —— 于是「改完封面
+ * 标题 → 直接点生成 PPT」会把刚改的覆盖回去。两处都写才闭合。
+ */
+function mergeOutlinePatch(patch) {
+  if (!patch || !patch.length || !state.outline) return 0;
+  let n = 0;
+  patch.forEach((p) => {
+    if (!p || p.after === undefined) return;
+    if (p.field === 'cover.title') { state.outline.title = p.after; n++; }
+    else if (p.field === 'cover.subtitle') { state.outline.subtitle = p.after; n++; }
+    else if (p.field === 'toc') { state.outline.toc = p.after; n++; }
+  });
+  if (n) renderOutline(state.outline);      // 编辑区与 JSON 文本域一起刷
+  return n;
+}
+
+$('btnDiscard').onclick = () => {
+  state.revise = null;
+  $('diffPanel').classList.add('hidden');
+  setStatus('已丢弃修改方案');
+};
+
+$('btnApply').onclick = async () => {
+  if (state.busy) return;
+  const items = collectAccepted();
+  if (!items.length) return setStatus('没有勾选任何一条', false, 'warn');
+  const deck = state.result && state.result.deck_live;
+  if (!deck) return;
+
+  $('btnApply').disabled = true;
+  clearJob();
+  setStatus('正在应用 ' + items.length + ' 条修改并重渲改动的页…', true);
+  try {
+    const { job_id } = await api('/api/revise/apply', {
+      deck: deck, mode: reviseMode(), items: items,
+      sha: state.revise.sha, rid: state.revise.rid,
+    });
+    const job = await poll(job_id);
+    if (job.error) throw new Error(job.error);
+    const r = job.result;
+    state.revise = null;
+    showResult(r);
+    // 封面标题/目录条目是**从大纲派生的**（重新规划时会被重算）——
+    // 所以服务端写盘之外，页面上这份大纲也要同步，否则下次点「生成 PPT」会丢
+    const merged = mergeOutlinePatch(r.outline_patch);
+    const s = r.summary || {};
+    setStatus('已修改 ' + (r.changed || []).length + ' 页（重渲 '
+      + (r.rendered || []).length + ' 张），几何检查 '
+      + (s.error || 0) + ' error / ' + (s.warn || 0) + ' warn'
+      + (merged ? '；同时更新了大纲里的 ' + merged + ' 处' : ''));
+    $('resultPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (e) {
+    setError('应用失败：' + e.message);
+  } finally {
+    $('btnApply').disabled = false;
+  }
 };
 
 /* ── 新建 ─────────────────────────────────────────────────── */

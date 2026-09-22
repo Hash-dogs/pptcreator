@@ -124,6 +124,46 @@
       </div>
       <div id="downloadArea" class="download-area empty">生成完成后，这里会出现下载链接与逐页预览。</div>
       <div id="previewGrid" class="preview-grid"></div>
+
+      <!-- 按页提修改意见：一个输入框说多个页面要改什么，两种模式 -->
+      <div id="revisePanel" class="revise-panel hidden">
+        <div class="panel-title">
+          <h3>按页修改</h3>
+          <span class="meta">对着上面的预览图说第几页要改什么 —— 一个框里可以写多条</span>
+        </div>
+        <div class="revise-modes">
+          <label class="mode-radio">
+            <input type="radio" name="reviseMode" value="patch" checked>
+            <strong>小范围修改</strong>
+            <small>只改文字，版式不变（快、可预期）</small>
+          </label>
+          <label class="mode-radio">
+            <input type="radio" name="reviseMode" value="rewrite">
+            <strong>整页重做</strong>
+            <small>这一页重讲，可以换版式（慢、可能整页变样）</small>
+          </label>
+        </div>
+        <textarea id="reviseText" class="revise-input" spellcheck="false"
+          placeholder="例：第 5 页标题太长了，压到 10 字以内；第 7 页那条说明改短些"></textarea>
+        <div class="revise-actions">
+          <button type="button" id="btnQuote" class="secondary">引用选中的页</button>
+          <span id="pickedHint" class="meta"></span>
+          <button type="button" id="btnRevise" class="primary">生成修改方案</button>
+        </div>
+      </div>
+
+      <!-- 修改方案：逐条 diff，确认后才应用 -->
+      <div id="diffPanel" class="panel hidden">
+        <div class="panel-title">
+          <h3>修改方案</h3>
+          <span id="diffMeta" class="meta"></span>
+        </div>
+        <div id="diffList" class="diff-list"></div>
+        <div class="panel-actions">
+          <button type="button" id="btnDiscard" class="secondary">全部丢弃</button>
+          <button type="button" id="btnApply" class="primary">应用选中的修改</button>
+        </div>
+      </div>
     </section>
 
   </main>
@@ -137,6 +177,7 @@
     <button type="button" id="lbPrev" class="lb-nav" title="上一页（←）">‹</button>
     <span id="lbPage" class="lb-page"></span>
     <button type="button" id="lbNext" class="lb-nav" title="下一页（→）">›</button>
+    <button type="button" id="lbToggle" class="lb-toggle hidden">改动前</button>
   </div>
   <button type="button" id="lbClose" class="lb-close" title="关闭（Esc）">✕</button>
 </div>
