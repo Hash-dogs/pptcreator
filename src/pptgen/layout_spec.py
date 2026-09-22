@@ -231,6 +231,30 @@ def candidates(role: str, intent: str, shape: dict | None = None) -> list[Layout
     return sorted(out, key=lambda s: 0 if (s.intents and s.intents[0] == intent) else 1)
 
 
+def candidates_any_intent(role: str, shape: dict | None = None, *,
+                          first_intent: str = '', limit: int = 8) -> list[str]:
+    """**不锁定意图**的候选集（按页修订用）。
+
+    规划阶段每页的意图来自大纲，锁死意图是对的（那是「这一页该讲什么」的决策）。
+    但用户的一次「重做」请求可能**改变这一页的性质** —— 实测：一页 `definition`
+    被要求「换成能对比的形式」，锁在 definition 的候选里时模型**根本选不到**
+    `comparison_rows`，只能又给一个单点陈述，而它照做了、看不出哪里不对。
+
+    所以修订路径按内容形态放行全部意图：**保留容量与形态这道真实约束**
+    （`_capacity_ok`），去掉意图那道会误杀用户明确要求的枷锁。
+    `first_intent` 排在最前，于是没有特别要求时仍优先原意图的版式。
+    """
+    _ensure_loaded()
+    order = ([first_intent] if first_intent in INTENTS else []) + \
+            [i for i in INTENTS if i != first_intent]
+    out: list[str] = []
+    for it in order:
+        for sp in candidates(role, it, shape):
+            if sp.name not in out:
+                out.append(sp.name)
+    return out[:limit]
+
+
 def resolve(sp: LayoutSpec | None, role: str, intent: str,
             shape: dict | None = None, taken: set[str] | None = None) -> LayoutSpec:
     """候选集为空时的降级：沿 fallback 链走，最后兜底 statement。
@@ -307,6 +331,28 @@ def candidate_text(names: list[str]) -> str:
                             ('适合：' + sp.best_for) if sp.best_for else '',
                             ('不适合：' + sp.avoid_for) if sp.avoid_for else '') if b]
         L.append('- **%s** —— %s' % (n, '；'.join(bits)))
+    return '\n'.join(L)
+
+
+def catalog_for(name: str) -> str:
+    """**单个**版式的字段契约（按页修订用）。
+
+    修订一次只动一页，没必要把 19 套版式的目录（5000 多字符）全发过去 ——
+    那既费 token，也让模型在无关版式里分心。与 `catalog_text` 同源，
+    只是取其中一项。
+    """
+    _ensure_loaded()
+    sp = REGISTRY.get(name)
+    if sp is None:
+        return ''
+    L = ['版式：%s' % sp.name]
+    if sp.signature or sp.best_for:
+        L.append('用途：%s' % (sp.signature or sp.best_for))
+    rng = sp.item_range()
+    if rng:
+        L.append('容量：%s。' % rng)
+    for line in (sp.catalog or '').strip().splitlines():
+        L.append(line.strip())
     return '\n'.join(L)
 
 
