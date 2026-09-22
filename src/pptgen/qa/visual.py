@@ -88,23 +88,34 @@ _SUBPROC = dict(capture_output=True, encoding='utf-8', errors='replace')
 
 
 def render_pages(pptx: str, out_dir: str, pages: list[int] | None = None,
-                 native: bool = True) -> dict[int, str]:
-    """用 officecli 逐页渲染 PNG，返回 {页码: 路径}。"""
+                 native: bool = True, width: int | None = None,
+                 height: int | None = None) -> dict[int, str]:
+    """用 officecli 逐页渲染 PNG，返回 {页码: 路径}。
+
+    width/height 传了才指定输出分辨率，不传就走 officecli 自己的默认
+    （1280×720）。**默认值刻意保持不动**：走这条默认的是 AI 看图复核的
+    Tier 2 详情图，那些图会 base64 塞进视觉模型，像素翻 2.25 倍等于凭空
+    放大请求体积 —— 那是 QA 回路调好的参数，不该被前端预览顺手改掉。
+    只有 Web 逐页预览（server.py 的 `_render`）需要更高分辨率。
+    """
     exe = find_officecli()
     if not exe:
         raise RuntimeError('未找到 officecli，无法渲染')
     os.makedirs(out_dir, exist_ok=True)
+    size = (['--screenshot-width', str(width), '--screenshot-height', str(height)]
+            if width and height else [])
     got: dict[int, str] = {}
     for pg in (pages or []):
         out = os.path.join(out_dir, 'page-%02d.png' % pg)
-        cmd = [exe, 'view', pptx, 'screenshot', '--page', str(pg), '-o', out]
-        if native:
-            cmd += ['--render', 'native']
-        r = subprocess.run(cmd, **_SUBPROC)
+        # 先拼出不含渲染器选择的公共部分，退回分支复用它 —— 不回带 size 的话
+        # native 一失败，分辨率就静默掉回默认，而预览图是 1280 还是 1920
+        # 在页面上看不出来（只是糊一点），这种降级很难被发现。
+        base = [exe, 'view', pptx, 'screenshot', '--page', str(pg), '-o', out] + size
+        r = subprocess.run(base + (['--render', 'native'] if native else []),
+                           **_SUBPROC)
         if r.returncode != 0 or not os.path.isfile(out):
             # native 渲染器在部分环境下不稳定，退回默认渲染
-            cmd = [exe, 'view', pptx, 'screenshot', '--page', str(pg), '-o', out]
-            r = subprocess.run(cmd, **_SUBPROC)
+            r = subprocess.run(base, **_SUBPROC)
         if os.path.isfile(out):
             got[pg] = out
     return got

@@ -129,6 +129,18 @@
   </main>
 </div>
 
+<!-- 预览弹层。放在 .app-shell 外面：它是 position:fixed 的整屏覆盖层，
+     落进那个 grid 里没有好处，只多一层布局上下文要操心。 -->
+<div id="lightbox" class="lightbox hidden">
+  <img id="lbImg" alt="">
+  <div class="lb-bar">
+    <button type="button" id="lbPrev" class="lb-nav" title="上一页（←）">‹</button>
+    <span id="lbPage" class="lb-page"></span>
+    <button type="button" id="lbNext" class="lb-nav" title="下一页（→）">›</button>
+  </div>
+  <button type="button" id="lbClose" class="lb-close" title="关闭（Esc）">✕</button>
+</div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

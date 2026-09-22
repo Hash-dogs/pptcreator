@@ -18,6 +18,9 @@ const state = {
   pollToken: 0,          // 作废过期轮询：换任务后旧 timer 自然失效
   statusTimer: null,
   statusMsg: '',
+  previewUrls: [],       // 逐页预览图的 URL，弹层翻页要用（deck 名出了
+                         // showResult 就没了，所以必须存下来）
+  lbIndex: -1,           // 弹层当前页码（0 基）；-1 = 没开
 };
 
 const MAX_FILES = 8;
@@ -545,17 +548,82 @@ function showResult(r) {
 
   const g = $('previewGrid');
   const pages = r.pages || [];
+  // 缩略图用的就是全尺寸原图（没有单独的缩略图接口），所以点开放大
+  // 是纯本地行为，不会再发一次请求 —— 弹层直接复用这些 URL。
+  state.previewUrls = pages.map((p) =>
+    '/preview/' + encodeURIComponent(r.name) + '/' + encodeURIComponent(p));
   if (pages.length) {
     g.innerHTML = pages.map((p, i) =>
-      '<div class="preview-card">'
-      + '<img loading="lazy" src="/preview/' + encodeURIComponent(r.name) + '/'
-      + encodeURIComponent(p) + '" alt="第 ' + (i + 1) + ' 页">'
+      '<div class="preview-card" data-idx="' + i + '" title="点击放大">'
+      + '<img loading="lazy" src="' + state.previewUrls[i] + '"'
+      + ' alt="第 ' + (i + 1) + ' 页">'
       + '<span>第 ' + (i + 1) + ' 页</span></div>').join('');
   } else {
     g.innerHTML = '<p class="hint">没有渲染图 —— 检查 officecli 是否可用'
       + '（缺了它不影响 pptx 本身，只是看不到逐页预览）。</p>';
   }
 }
+
+/* ── 预览弹层 ─────────────────────────────────────────────── */
+/* 点缩略图放大看整页。左右方向键/按钮翻页，到头循环。
+ *
+ * 键盘是「不常驻」的：全站只有这一处监听 keydown，所以弹层关着的时候
+ * 必须直接 return —— 否则方向键会被这里吃掉，#outlineJson 那个
+ * textarea 里就没法用方向键移光标了。
+ */
+function openLightbox(idx) {
+  if (idx < 0 || idx >= state.previewUrls.length) return;
+  state.lbIndex = idx;
+  $('lightbox').classList.remove('hidden');
+  paintLightbox();
+}
+
+function paintLightbox() {
+  const n = state.previewUrls.length;
+  const i = state.lbIndex;
+  $('lbImg').src = state.previewUrls[i];
+  $('lbImg').alt = '第 ' + (i + 1) + ' 页';
+  $('lbPage').textContent = '第 ' + (i + 1) + ' / ' + n + ' 页';
+}
+
+function stepLightbox(d) {
+  const n = state.previewUrls.length;
+  if (!n) return;
+  // 循环：一屏看完整个 deck 比撞到头停住更顺
+  state.lbIndex = (state.lbIndex + d + n) % n;
+  paintLightbox();
+}
+
+function closeLightbox() {
+  state.lbIndex = -1;
+  $('lightbox').classList.add('hidden');
+  // 清掉 src，免得下次打开时先闪一下上一张
+  $('lbImg').removeAttribute('src');
+}
+
+$('previewGrid').onclick = (e) => {
+  const card = e.target.closest('.preview-card');
+  if (!card) return;
+  openLightbox(Number(card.dataset.idx));
+};
+
+$('lbClose').onclick = closeLightbox;
+$('lbPrev').onclick = () => stepLightbox(-1);
+$('lbNext').onclick = () => stepLightbox(1);
+
+// 点图片本身不关，点四周的背景才关
+$('lightbox').onclick = (e) => {
+  if (e.target === $('lightbox')) closeLightbox();
+};
+
+document.onkeydown = (e) => {
+  if (state.lbIndex < 0) return;
+  if (e.key === 'Escape') { closeLightbox(); }
+  else if (e.key === 'ArrowLeft') { stepLightbox(-1); }
+  else if (e.key === 'ArrowRight') { stepLightbox(1); }
+  else { return; }
+  e.preventDefault();
+};
 
 /* ── 新建 ─────────────────────────────────────────────────── */
 $('newBtn').onclick = async () => {
@@ -581,6 +649,9 @@ $('newBtn').onclick = async () => {
   dl.classList.add('empty');
   dl.textContent = '生成完成后，这里会出现下载链接与逐页预览。';
   $('previewGrid').innerHTML = '';
+  state.previewUrls = [];
+  state.lbIndex = -1;
+  $('lightbox').classList.add('hidden');
   setSourceMode('upload');
   setStatus('等待输入');
 };

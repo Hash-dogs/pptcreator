@@ -134,6 +134,22 @@ def page_range() -> tuple[int, int]:
     return (lo, hi) if lo <= hi else (hi, lo)
 
 
+def preview_size() -> tuple[int, int]:
+    """Web 逐页预览图的渲染分辨率（宽, 高）。
+
+    默认 1920×1080 就是 officecli native 渲染的上限 —— 传更大的
+    `--screenshot-width` 仍然只出 1920×1080，所以没有调高的余地。
+    调低只省磁盘：渲染耗时取决于 PowerPoint 起进程，与分辨率无关
+    （实测 1280 与 1920 都是每页约 10 秒）。
+
+    只给 Web 预览用。见 `visual.render_pages()` 的 width/height 参数 ——
+    AI 看图复核那一路（Tier 2 详情图）刻意保持默认，那些图会 base64
+    塞进视觉模型，像素翻 2.25 倍等于凭空放大请求体积。
+    """
+    return (get_int('PPTGEN_PREVIEW_WIDTH', 1920),
+            get_int('PPTGEN_PREVIEW_HEIGHT', 1080))
+
+
 # ── 分阶段输出上限 ────────────────────────────────────────────
 # 大纲与规划都是「一次要吐好几千 token 的 JSON」的调用，而 .env 里那个
 # PPTGEN_MAX_TOKENS 是给通用调用调的（默认 8000）。推理模型会把相当一部分额度
@@ -233,11 +249,13 @@ def template_path() -> str:
 def summary() -> str:
     llm, vis = llm_config(), vision_config()
     lo, hi = page_range()
+    pw, ph = preview_size()
     return '\n'.join([
         '配置状态',
         '  文本模型 : %s' % (llm or '未配置（大纲/规划将走确定性模式）'),
         '  视觉模型 : %s' % (vis or '未配置（看图输出人工复核包）'),
         '  页数区间 : %d–%d（正文；章节分隔页另计）' % (lo, hi),
+        '  预览分辨率: %d×%d（仅 Web 逐页预览）' % (pw, ph),
         '  章节分隔 : %s' % ('插入' if section_dividers() else '不插（PPTGEN_SECTION_DIVIDERS=0）'),
         '  内容策略 : %s' % content_mode(),
         '  模板     : %s' % template_path(),

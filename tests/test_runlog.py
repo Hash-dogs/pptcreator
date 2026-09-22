@@ -288,6 +288,39 @@ class TestServerPathHelpers(_Base):
             self.assertEqual(s._stem_of('out/plans/' + path), 'x', path)
         self.assertEqual(s._stem_of('out/plans/plain.json'), 'plain')
 
+    def test_preview_stamp_tracks_render_recipe(self):
+        """指纹里必须带渲染配方，否则改了分辨率旧图不会重渲。
+
+        `_drop_stale_renders` 原来只看 pptx 的 mtime+size —— pptx 没动、
+        我们改了 `PPTGEN_PREVIEW_WIDTH` 时，它会认为「没变化」，把旧的
+        1280 图留在原地。页面上看不出区别（只是糊一点），于是
+        「提高了清晰度」这件事悄悄没生效。
+        """
+        s = self.server
+        import pptgen.config as config                   # noqa: PLC0415
+        old = (os.environ.get('PPTGEN_PREVIEW_WIDTH'),
+               os.environ.get('PPTGEN_PREVIEW_HEIGHT'))
+        self.addCleanup(self._restore_preview_env, old)
+        os.environ['PPTGEN_PREVIEW_WIDTH'] = '1920'
+        os.environ['PPTGEN_PREVIEW_HEIGHT'] = '1080'
+        wide = s._preview_sig()
+        self.assertEqual(wide, '1920x1080')
+        os.environ['PPTGEN_PREVIEW_WIDTH'] = '1280'
+        os.environ['PPTGEN_PREVIEW_HEIGHT'] = '720'
+        self.assertNotEqual(s._preview_sig(), wide)
+        # 默认值：不配也该是 1920x1080（native 渲染的上限）
+        os.environ.pop('PPTGEN_PREVIEW_WIDTH', None)
+        os.environ.pop('PPTGEN_PREVIEW_HEIGHT', None)
+        self.assertEqual(config.preview_size(), (1920, 1080))
+
+    @staticmethod
+    def _restore_preview_env(old):
+        for k, v in zip(('PPTGEN_PREVIEW_WIDTH', 'PPTGEN_PREVIEW_HEIGHT'), old):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
     def test_find_source_reports_where_it_found_it(self):
         s = self.server
         name = 'probe.txt'

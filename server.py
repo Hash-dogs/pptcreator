@@ -340,6 +340,15 @@ def _officecli_ok() -> bool:
     return bool(visual.find_officecli())
 
 
+def _preview_sig() -> str:
+    """预览渲染的「配方」指纹，进 `.pptx-stamp` 用。
+
+    目前只有分辨率。改了它，所有已渲染的图都会失效重渲一次。
+    """
+    w, h = cfg_mod.preview_size()
+    return '%dx%d' % (w, h)
+
+
 def _drop_stale_renders(work: str, pptx: str) -> None:
     """deck 换了就把上一份的渲染图清掉。
 
@@ -349,9 +358,13 @@ def _drop_stale_renders(work: str, pptx: str) -> None:
 
     踩过：11:25 那次跑完，页面上 17 张预览全是 09:23 那一版的 15 页内容，
     用户按预览里的页码反馈问题，指的根本不是这一版。**预览看着成功，其实是旧的。**
+
+    指纹里还带着渲染配方（`_preview_sig`）：pptx 没动、但我们改了分辨率时，
+    只看 mtime+size 会认为「没变化」而留着旧的 1280 图 —— 页面上看不出区别，
+    只是糊一点，于是「提高了清晰度」这件事悄悄没生效。
     """
     st = os.stat(pptx)
-    stamp = '%d:%d' % (st.st_mtime_ns, st.st_size)
+    stamp = '%d:%d:%s' % (st.st_mtime_ns, st.st_size, _preview_sig())
     mark = os.path.join(work, '.pptx-stamp')
     try:
         with open(mark, 'r', encoding='utf-8') as f:
@@ -379,12 +392,13 @@ def _render(pptx: str, work: str) -> list[str]:
         return []
     os.makedirs(work, exist_ok=True)
     _drop_stale_renders(work, pptx)
+    w, h = cfg_mod.preview_size()
     n = len(Presentation(pptx).slides)
     got = []
     for pg in range(1, n + 1):
         out = os.path.join(work, 'page-%02d.png' % pg)
         if not os.path.isfile(out):
-            visual.render_pages(pptx, work, [pg], native=True)
+            visual.render_pages(pptx, work, [pg], native=True, width=w, height=h)
         if os.path.isfile(out):
             got.append('page-%02d.png' % pg)
         if pg == 1:

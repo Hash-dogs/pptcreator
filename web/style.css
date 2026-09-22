@@ -296,8 +296,39 @@ a.dl:hover{background:#00345F}
 .preview-card{
   border:1px solid var(--line); border-radius:6px; background:#fff; padding:8px;
 }
-.preview-card img{width:100%; display:block; border-radius:3px}
+.preview-card img{width:100%; display:block; border-radius:3px; cursor:zoom-in}
 .preview-card span{display:block; color:var(--muted); font-size:12px; margin-top:6px}
+.preview-card:hover{border-color:var(--red); box-shadow:0 0 0 2px #FBE0E7}
+
+/* ── 预览弹层 ─────────────────────────────────────────── */
+/* 全站唯一的 fixed 覆盖层。图片按 90vw/82vh 收缩 —— 高度留出下面
+   那条翻页栏的位置。渲染图本身是 1920×1080，放大到全屏会超出窗口，
+   所以这里是「缩下来看全页」，不存在拉伸糊掉的问题。 */
+.lightbox{
+  position:fixed; inset:0; z-index:100;
+  display:flex; align-items:center; justify-content:center;
+  background:rgba(35,31,32,.88);
+  animation:lb-fade .15s ease-out;
+}
+@keyframes lb-fade{from{opacity:0} to{opacity:1}}
+.lightbox img{
+  max-width:90vw; max-height:82vh;
+  border-radius:4px; box-shadow:0 8px 40px rgba(0,0,0,.5);
+}
+.lb-bar{
+  position:absolute; bottom:22px; left:50%; transform:translateX(-50%);
+  display:flex; align-items:center; gap:14px;
+  color:#fff; font-size:13px;
+}
+.lb-page{min-width:96px; text-align:center; letter-spacing:.3px}
+.lb-nav,.lb-close{
+  width:34px; height:34px; border-radius:50%; cursor:pointer;
+  border:1px solid rgba(255,255,255,.35); background:rgba(255,255,255,.1);
+  color:#fff; line-height:1;
+}
+.lb-nav:hover,.lb-close:hover{background:rgba(255,255,255,.22); border-color:#fff}
+.lb-nav{font-size:19px}
+.lb-close{position:absolute; top:18px; right:22px; font-size:15px}
 
 /* ── 窄屏 ─────────────────────────────────────────────── */
 @media (max-width:980px){
