@@ -585,8 +585,8 @@ function showResult(r) {
       const label = meta.label || ('第 ' + (i + 1) + ' 页');
       const tip = [label, meta.layout, meta.headline].filter(Boolean).join(' · ');
       const changed = (r.changed || []).indexOf(i + 1) >= 0;
-      // 模板页（封面/目录/封底）也能微调，只是不能重做 —— 不用特别标出来，
-      // 提交后服务端会按类型给出准确的说法。
+      // 模板页（封面/目录/封底）不用特别标出来：服务端会按页给出准确的说法
+      // （封底没有可改内容；封面/目录微调是改字段、重做是重出文案）。
       return '<div class="preview-card' + (meta.kind ? ' k-' + esc(meta.kind) : '')
         + (changed ? ' changed' : '') + '" data-idx="' + i + '"'
         + ' data-kind="' + esc(meta.kind || '') + '" title="' + esc(tip) + '">'
@@ -766,9 +766,15 @@ function diffRow(it, i) {
     : it.status === 'warn' ? '<span class="badge warn">有提醒</span>'
       : '<span class="badge ok">可直接应用</span>';
   let body = '';
-  if (it.new) {
+  if (it.tpl_kind) {
+    // 模板页（封面/目录）的整页重做 = 重出文案：模板页没有版式可换，
+    // `new` 里没有 `layout`，照旧渲染会印出「版式 ? → ?」。
+    const what = it.tpl_kind === 'cover' ? '封面' : '目录';
+    body += '<div class="diff-line">整页重做：重出' + what + '文案'
+      + '（仍用模板的' + what + '页，版式不变）</div>';
+  } else if (it.new && it.new.layout) {
     body += '<div class="diff-line">版式 <code>' + esc(it.was_layout || page.layout || '?')
-      + '</code> → <code>' + esc(it.new.layout || '?') + '</code></div>'
+      + '</code> → <code>' + esc(it.new.layout) + '</code></div>'
       + '<div class="diff-line">新大字：<ins>' + esc(headlineOf(it.new) || '（无）')
       + '</ins></div>';
   }
@@ -870,8 +876,10 @@ $('btnApply').onclick = async () => {
   clearJob();
   setStatus('正在应用 ' + items.length + ' 条修改并重渲改动的页…', true);
   try {
+    // 模式用**方案那一份**，不重读单选框：方案出来之后拨一下开关，就会拿另一套
+    // 逻辑去套这份条目（重做的条目被当字段补丁、或反过来），而条目本身没变。
     const { job_id } = await api('/api/revise/apply', {
-      deck: deck, mode: reviseMode(), items: items,
+      deck: deck, mode: state.revise.mode || reviseMode(), items: items,
       sha: state.revise.sha, rid: state.revise.rid,
     });
     const job = await poll(job_id);
