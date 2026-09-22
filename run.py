@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 import argparse
+import copy
 import importlib
 import json
 import os
@@ -44,6 +45,7 @@ from pptgen import config as cfg_mod                       # noqa: E402
 from pptgen import parse as parse_mod                      # noqa: E402
 from pptgen import pipeline                                # noqa: E402
 from pptgen import repair as repair_mod                    # noqa: E402
+from pptgen import revise as revise_mod                    # noqa: E402
 from pptgen import runlog                                  # noqa: E402
 from pptgen.qa import geometry, visual                     # noqa: E402
 
@@ -282,6 +284,185 @@ def cmd_repair(args):
     return out_pptx
 
 
+def _deck_stem(path: str) -> str:
+    """`x.deck.json` / `x.deck.repaired.json` → `x`。
+
+    不能只 `splitext`：后缀是**叠加**的（`x.deck.repaired.json`），
+    只剥一层会得到 `x.deck`。服务器那边有同一件事的 `_stem_of`（带正则），
+    这里判据简单些但也必须叠加着剥。
+    """
+    base = os.path.basename(path)
+    i = base.find('.deck')
+    return base[:i] if i > 0 else os.path.splitext(base)[0]
+
+
+def _sibling(deck_path: str, suffix: str) -> str:
+    """deck 旁边的同名中间产物（`<stem>.outline.json` / `<stem>.parsed.json`）。"""
+    return _abs(os.path.join(PLANS, _deck_stem(deck_path) + suffix))
+
+
+def cmd_revise(args):
+    """按页修订：一段自然语言 → 逐页的修改方案（`--apply` 才落盘）。
+
+    这是**不启前端就能验**的通道：prompt 质量的问题不该穿过整个 Web 层才被发现，
+    而 `--apply` 之前只打印方案、一个字节都不写。
+    """
+    cfg_mod.load_env()
+    cfg = cfg_mod.llm_config()
+    if cfg is None:
+        # 这里刻意**不学** outline/plan 的「没模型也能跑完」兜底：修订的全部价值
+        # 就在于理解用户那句话，出不了补丁的「成功」是最坏的静默失败。
+        raise SystemExit('修订需要文本模型（配 PPTGEN_LLM_*）。'
+                         '没有模型时可以直接改 out/plans/*.deck.repaired.json。')
+    deck_path = _abs(args.deck)
+    deck = pipeline.load_json(deck_path)
+
+    bad = revise_mod.check_deck_layouts(deck)
+    if bad:
+        raise SystemExit(bad)
+
+    index = revise_mod.build_page_index(deck)
+    mode = args.mode or 'patch'
+    print('[revise] %s ｜ 模式：%s ｜ 预览图 %d 张'
+          % (deck_path, '微调' if mode == 'patch' else '整页重做', len(index)))
+    print()
+
+    with runlog.stage('revise') as st:
+        triage = revise_mod.split_requests(args.text, index, cfg)
+        for u in triage['unclear']:
+            print('[revise] ? %s' % u)
+        if not triage['items']:
+            raise SystemExit('没有解析出任何可执行的修改要求。')
+
+        outline, doc = None, None
+        if mode == 'rewrite':
+            outline = pipeline.load_json(args.outline or _sibling(deck_path, '.outline.json'))
+            doc = pipeline.load_json(args.parsed or _sibling(deck_path, '.parsed.json'))
+
+        by_preview = {e['preview']: e for e in index}
+        proposals = []
+        if mode == 'patch':
+            proposals = revise_mod.propose_patches(deck, triage['items'], cfg)
+        else:
+            cap = revise_mod.max_rewrite_pages()
+            rewrote = 0
+            for it in triage['items']:
+                page = by_preview.get(it['preview']) or {}
+                if page.get('kind') in ('cover', 'toc', 'back'):
+                    proposals.append(dict(it, status='reject', ops=[], new=None,
+                                          reason='%s 是模板页，只能微调，不能重做'
+                                                 % page.get('label')))
+                    continue
+                if page.get('layout') == revise_mod.DIVIDER_LAYOUT:
+                    proposals.append(dict(it, status='reject', ops=[], new=None,
+                                          reason='章节分隔页是结构页，没有版式可换 —— '
+                                                 '只能微调它的章节名/导语'))
+                    continue
+                if rewrote >= cap:
+                    proposals.append(dict(it, status='reject', ops=[], new=None,
+                                          reason='一次最多重做 %d 页'
+                                                 '（PPTGEN_REVISE_MAX_PAGES）'
+                                                 '—— 这一页本次没做' % cap))
+                    continue
+                rewrote += 1
+                print('[revise] 正在重做第 %d 页…' % it['preview'])
+                new, why = revise_mod.redo_slide(deck, it['preview'], outline, doc,
+                                                it['request'], cfg)
+                if new is None:
+                    proposals.append(dict(it, status='reject', ops=[], new=None,
+                                          reason=why))
+                else:
+                    proposals.append(dict(it, status='warn' if why else 'ok', ops=[],
+                                          new=new, reason=why))
+
+        for p in proposals:
+            page = by_preview.get(p['preview']) or {}
+            print()
+            print('  第 %d 页（%s）· %s'
+                  % (p['preview'], (page.get('label') or '').split('·')[-1].strip(),
+                     '整页重做' if mode == 'rewrite' else '微调'))
+            print('    你说：%s' % (p.get('quote') or p.get('request')))
+            if p['status'] == 'reject':
+                print('    ✗ 不能应用：%s' % p['reason'])
+                continue
+            if mode == 'rewrite':
+                print('    版式：%s → %s' % (page.get('layout'),
+                                            (p['new'] or {}).get('layout')))
+                print('    新大字：%s' % revise_mod.headline(p['new'] or {}))
+                if p['reason']:
+                    print('    ! %s' % p['reason'])
+                continue
+            for c in p.get('changes') or []:
+                print('    改 %s：「%s」→「%s」' % (c['path'], c['before'][:34],
+                                                  c['after'][:34]))
+            if p['reason']:
+                print('    ! %s' % p['reason'])
+
+        ok = [p for p in proposals if p['status'] != 'reject']
+        st.update(items=len(proposals), applicable=len(ok), mode=mode)
+        if not args.apply:
+            print()
+            print('[revise] 以上是方案，**没有落盘**。确认无误后加 --apply 应用。')
+            return ''
+
+        # ── 应用：先全量应用 + 预演构建，干净了才写盘 ──────────────
+        rep: dict = {}
+        if mode == 'rewrite':
+            out_deck = copy.deepcopy(deck)
+            for it, p in zip(triage['items'], proposals):
+                if p['status'] == 'reject' or p.get('new') is None:
+                    continue
+                out_deck['slides'][it['preview'] - revise_mod.PAGE_OFFSET] = p['new']
+        else:
+            out_deck, rep = revise_mod.apply_revision(
+                deck, [dict(it, ops=p['ops']) for it, p in
+                       zip(triage['items'], proposals) if p['status'] != 'reject'])
+
+        out_pptx = _abs(args.out or os.path.join(SAMPLES, _deck_stem(deck_path) + '.pptx'))
+        template = args.template or cfg_mod.template_path()
+
+        def build_qa(spec):
+            build_mod.build(spec, template, out_pptx, fill_toc=True, on_log=print)
+            return geometry.analyse(out_pptx)
+
+        changed = {p['preview'] for p in proposals if p['status'] != 'reject'}
+        print()
+        print('[revise] 预演构建（只为看改动的页有没有撑破版面）…')
+        issues = revise_mod.check_by_build(out_deck, build_qa, changed)
+        if issues:
+            for pg, why in sorted(issues.items()):
+                print('[revise] ✗ 第 %d 页：%s' % (pg, '；'.join(why)))
+            raise SystemExit('改动的页有版面问题，**没有落盘**。'
+                             '把要求写得更短一些，或改用 --mode rewrite 重排这一页。')
+
+        spec_out = os.path.splitext(deck_path)[0] + '.revised.json'
+        pipeline.save_json(out_deck, spec_out)
+        print('[revise] 已应用 %d 条 → %s' % (len(ok), spec_out))
+        print('[revise] 成品 → %s' % out_pptx)
+        if mode != 'rewrite' and rep.get('outline'):
+            print('[revise] 需要同步回大纲的字段：%s'
+                  % '；'.join('%s → %s' % (p['field'], str(p['after'])[:30])
+                             for p in rep['outline']))
+            # 真的写回去 —— 目录条目与封面标题都是**从大纲派生的**，只改 deck 的话
+            # 下一次 `plan` 会把它们 silently 冲掉。**先备份**：这一步改的是
+            # 用户手头那份大纲，写坏了就没有回头路。
+            opath = args.outline or _sibling(deck_path, '.outline.json')
+            if os.path.isfile(opath):
+                cur = pipeline.load_json(opath)
+                bak = os.path.splitext(opath)[0] + '.before-revise.json'
+                if not os.path.isfile(bak):
+                    pipeline.save_json(cur, bak)
+                    print('[revise] 原大纲已备份 → %s' % bak)
+                pipeline.save_json(revise_mod.apply_outline_patch(cur, rep['outline']),
+                                   opath)
+                print('[revise] 已同步回大纲 → %s' % opath)
+        runlog.note('revise', mode=mode, items=len(proposals), applied=len(ok),
+                    spec=spec_out, outline_patch=rep.get('outline') or [])
+        runlog.attach_pptx(out_pptx)
+        st.update(applied=len(ok))
+    return spec_out
+
+
 def cmd_full(args):
     """一条命令走完：大纲 → 规划 → 修复回环 → 渲染。"""
     cfg_mod.load_env()
@@ -358,6 +539,18 @@ def main():
     p.add_argument('--parsed')
     p.add_argument('--out')
 
+    p = sub.add_parser('revise', help='按页修订：一段话 → 逐页方案（--apply 才落盘）')
+    p.add_argument('--deck', required=True,
+                   help='out/plans/<name>.deck.repaired.json —— 要改哪一份')
+    p.add_argument('--text', required=True, help='用自然语言说哪几页要怎么改')
+    p.add_argument('--mode', choices=('patch', 'rewrite'), default='patch',
+                   help='patch=只改文字（版式不变）；rewrite=整页重做（可换版式）')
+    p.add_argument('--outline', help='rewrite 模式要读大纲取锚点/意图')
+    p.add_argument('--parsed')
+    p.add_argument('--apply', action='store_true', help='真的落盘（默认只打印方案）')
+    p.add_argument('--out')
+    p.add_argument('--template')
+
     p = sub.add_parser('build', help='渲染 pptx')
     p.add_argument('--spec')
     p.add_argument('--content', default='dify')
@@ -409,7 +602,7 @@ def main():
             {'config': cmd_config, 'parse': cmd_parse, 'outline': cmd_outline,
              'plan': cmd_plan, 'build': cmd_build, 'repair': cmd_repair,
              'full': cmd_full, 'qa': cmd_qa, 'render': cmd_render,
-             'all': cmd_all, 'auto': cmd_auto}[args.cmd](args)
+             'all': cmd_all, 'auto': cmd_auto, 'revise': cmd_revise}[args.cmd](args)
         if rl.dir:
             print()
             print('[log] %s' % rl.dir)
@@ -427,6 +620,10 @@ def _task_name(args) -> str:
     """
     if getattr(args, 'name', None):
         return str(args.name)
+    # `revise` 的输入是 deck —— 用 `_deck_stem` 剥（后缀是叠加的，
+    # `_STAGE_SUFFIX.sub` 只剥一层，会把 `x.deck.repaired` 留成 `x.deck`）
+    if getattr(args, 'deck', None):
+        return _deck_stem(args.deck)
     for attr in ('src', 'spec', 'file', 'outline', 'parsed'):
         v = getattr(args, attr, None)
         if v:
