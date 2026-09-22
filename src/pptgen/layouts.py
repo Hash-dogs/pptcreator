@@ -40,7 +40,7 @@ from . import layout_spec
 from .layout_spec import LayoutSpec
 from .tokens import (
     LEFT, RIGHT, W, FS, RED, DARK, MUTED, GREY, RULE, TINT, WHITE,
-    EA, LAT, Y_CONTENT, Y_CONTENT_BOTTOM, Y_SOURCE,
+    EA, LAT, Y_CONTENT, Y_SOURCE,
     put, hrule, vrule, dot, outline_box, tint_band,
     header, footer, fit_one_line, fit_block, text_w_in,
 )
@@ -805,32 +805,79 @@ def render_phase_grouped_flow(s, spec):
         intents=('timeline', 'process'),
         min_items=5, max_items=8,
         item_chars=22, total_chars=250,
-        signature='纵向时间线（左侧竖线 + 标记点，每步单行「名称 + 说明」）',
+        # 左右交替后每条只占半幅（5.245"），name 与 desc 各自单行。超了就折行顶破
+        # 0.56" 的框高 —— 硬上限 = name 8 字 + desc 单行 28 字。`overflow_reason`
+        # 量的是 `pipeline._items` 把 name+desc **拼起来**的那条，所以写 36。
+        max_item_chars=36,
+        signature='纵向时间线（轴线居中、左右交替，每步「序号 + 名称」+ 一句说明）',
         best_for='步骤较多（5–8 条）、每条一句话、有时间推进感',
-        avoid_for='每步需要两行以上说明（那说明框不够）',
+        avoid_for='说明需要三行以上（左右交替后每条只占半幅，说明只有一行）',
         fallback=('phase_grouped_flow', 'numbered_columns'),
         reuse_friendly=True,
-        catalog='''纵向时间线，5–8 步。适合步骤较多、每条一句话的场景。
+        catalog='''纵向时间线，5–8 步。轴线居中，奇数步靠左、偶数步靠右。
+   适合步骤较多、每条一句话、有时间推进感的场景。
    必填 steps: [{"name":"步骤名（≤8 字）","desc":"一句说明（≤22 字）"}]
    选填 source''',
-        capacity='steps 5–8 条；每条 name ≤8 字、desc ≤22 字。')
+        capacity='steps 5–8 条；每条 name ≤8 字、desc ≤22 字（单行硬上限 28 字，'
+                 'name+desc 合计 ≤36 字）。')
 def render_timeline_vertical(s, spec):
-    """纵向时间线：左侧竖线 + 标记点 + 单行「名称 + 说明」。"""
+    """纵向时间线：轴线居中，左右交替，每步两行「序号 + 名称 / 说明」。
+
+    轴线落在**版心中心**而不是幻灯片中心 —— 公司模板的版心左右边距本就不对称
+    （左 0.67 / 右 1.33，右侧留给装饰弧线），用版心中心两半才等宽。
+    """
     header(s, spec.get('kicker'), spec.get('title'))
     steps = spec['steps']
-    y0 = 2.10
-    ystep = min(0.665, (Y_CONTENT_BOTTOM - y0 - 0.20) / max(len(steps) - 1, 1))
-    vrule(s, 1.02, y0 + 0.06, ystep * (len(steps) - 1) + 0.10)
+    n = len(steps)
+
+    cx = LEFT + W / 2.0             # 6.335
+    axis_w = 0.75 / 72.0            # vrule 的线宽
+    gap = 0.42                      # 文本框 ↔ 轴线
+    half = cx - gap - LEFT          # 5.245 —— 左框 x=LEFT、右框 x=cx+gap，右边界正好 12.00
+    h_box = 0.56                    # 两行的框高。**下限 0.522**（几何⑤ need 39.76pt
+                                    #   ÷ (72×1.06)）—— 调小必报 text_overflow。
+    y_top, y_bot = 2.10, 6.64       # 末项底 6.64，距来源行 6.78 留 0.14"
+    span = y_bot - y_top - h_box    # 3.98
+    ystep = min(0.95, span / max(n - 1, 1))
+    y0 = y_top + (span - ystep * (n - 1)) / 2.0
+
+    # 轴线：`vrule` 的 x 是**左边缘**，`dot` 的中心是 x+size/2 —— 让两者都落在 cx。
+    # 纵向从首个点的上沿到末个点的下沿（点中心在 y+0.280，直径 0.11）。
+    vrule(s, cx - axis_w / 2, y0 + 0.225, ystep * (n - 1) + 0.11)
+
+    # name 的可用宽度必须**扣掉序号前缀**：几何⑤ 把段内所有 run 的宽度相加，
+    # 按整幅 half 去 fit 再拼上前缀会被估成两行（need 61.1pt > 42.7pt）→ text_overflow。
+    # 前缀 '01' + 两个空格 = 0.4044"，取 0.42。
+    name_w = half - 0.42
+    desc_w = half - 0.10
+
     for i, st in enumerate(steps):
         y = y0 + i * ystep
-        put(s, 0.30, y, 0.58, 0.4,
-            [[('%02d' % (i + 1), dict(size=14, color=RED, bold=True))]],
-            align=PP_ALIGN.RIGHT, anchor=MSO_ANCHOR.MIDDLE)
-        dot(s, 0.965, y + 0.13, 0.11, GREY)
-        put(s, 1.30, y, 10.7, 0.4,
-            [[(st['name'], dict(size=15, color=DARK, bold=True)),
-              ('   ' + st['desc'], dict(size=FS['small'], color=MUTED))]],
-            anchor=MSO_ANCHOR.MIDDLE)
+        left_side = (i % 2 == 0)
+        x = LEFT if left_side else cx + gap
+        align = PP_ALIGN.RIGHT if left_side else PP_ALIGN.LEFT
+        # 分隔空格写进 14pt 那个 run —— 放进 name 的 run 会被按 15pt 计价
+        paras = [
+            [('%02d' % (i + 1), dict(size=14, color=RED, bold=True)),
+             ('  ', dict(size=14, color=RED)),
+             (_fit(st['name'], name_w, 15), dict(size=15, color=DARK, bold=True))],
+            [(_fit(st.get('desc') or '', desc_w, FS['small']),
+              dict(size=FS['small'], color=MUTED))],
+        ]
+        # ls=1.32 显式给定：几何按写死的 1.42 估高，ls 调大真实行高会顶破 0.56"
+        # 而 QA 不报。不设 sa —— need_pt 里不含 space_after。
+        put(s, x, y, half, h_box, paras, align=align,
+            anchor=MSO_ANCHOR.MIDDLE, ls=1.32)
+
+        # 标记点落在轴线上（中心 = cx），连接线从文本框连到点的边缘。
+        # 点的 y 取两行文本块的**竖向中心**（= h_box/2），与 MIDDLE 锚定一致，
+        # 使连接线正对两行之间的留白，不与任一行相撞。
+        dot(s, cx - 0.055, y + 0.225, 0.11, GREY)
+        conn_y = y + 0.2748         # 点中心 0.280 − 发丝线半宽 0.0052
+        if left_side:
+            hrule(s, cx - gap + 0.02, conn_y, 0.345)
+        else:
+            hrule(s, cx + 0.055, conn_y, 0.345)
     footer(s, spec['page'], spec.get('source'))
 
 

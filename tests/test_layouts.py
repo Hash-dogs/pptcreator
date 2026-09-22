@@ -170,6 +170,8 @@ FIXTURES = [
         note=[('基础编排不修改内置提示，最适合新手起步', {'size': 15, 'color': 'DARK', 'bold': True})],
         **_kicker('04 实战一 · 聊天助手'))),
 
+    # 时间线两条：7 步守「奇数条时左侧多一个」的左右分配，8 步守条数上限
+    # （8 步时 ystep 被压到 0.569"，是全库最挤的一页 —— 溢出一旦发生就在这里）。
     ('timeline_vertical', dict(
         layout='timeline_vertical', title='用 Dify 搭企业知识库的七个步骤',
         steps=[dict(name='整理文档', desc='把内部资料整理成文档'),
@@ -180,6 +182,18 @@ FIXTURES = [
                dict(name='引用知识库', desc='上下文 → 添加 → 选中知识库'),
                dict(name='调试与发布', desc='对比助手输出与文档原文')],
         **_kicker('04 实战二 · 企业知识库'))),
+
+    ('timeline_vertical(n=8)', dict(
+        layout='timeline_vertical', title='八步走完内容生产流水线',
+        steps=[dict(name='选题', desc='从评论与搜索词里挑题'),
+               dict(name='收集素材', desc='抓取竞品笔记与图片'),
+               dict(name='拟定标题', desc='生成五个备选标题'),
+               dict(name='撰写正文', desc='按结构生成正文草稿'),
+               dict(name='生成配图', desc='按标题生成封面图'),
+               dict(name='取图 URL', desc='上传后回填图片地址'),
+               dict(name='组装结果', desc='标题正文封面合并成稿'),
+               dict(name='发布归档', desc='推送至草稿箱并记录')],
+        **_kicker('04 实战三 · 内容流水线'))),
 
     ('layered_stack', dict(
         layout='layered_stack', title='Dify 的技术栈分层',
