@@ -1289,9 +1289,22 @@ def _plan_by_llm(outline: dict, doc: dict, src: str, cfg, log) -> dict:
     return plan
 
 
-def _plan_batch(chunk: list[dict], src: str, cfg, used: dict, total: int) -> list[dict]:
+def _plan_batch(chunk: list[dict], src: str, cfg, used: dict, total: int,
+                *, notes: str = '') -> list[dict]:
+    """一批大纲页 → 幻灯片定义。
+
+    `notes` 是追加在 prompt 末尾的额外要求，**按页修订**用它放用户的原话
+    （「第 9 页整个重讲，讲讲落地路径就行」）。加这个参数而不是另写一个
+    prompt：那会把版式目录、设计规则、容量约束再抄一遍，而这个仓库里
+    手写清单的漂移已经发生过三次（见 README 的「版式系统」一节）。
+    """
     used_txt = ('已用过的版式及次数：%s（不要再堆同一种）'
                 % (used or '无')) if used else '这是第一批。'
+    # 用户原话要**带框**进 prompt：它和上面的版式契约是两种东西，混在一起
+    # 模型会把它当成又一条版式说明。同时点明它不能压过容量与版式约束。
+    notes_txt = ('\n**本次的额外修订要求**（来自用户，优先满足；'
+                 '但不得违反上面的版式与容量约束）：\n' + notes.strip() + '\n'
+                 ) if (notes or '').strip() else ''
     prompt = f"""你在把一份大纲落成具体的幻灯片。整份共 {total} 页，本批需要处理 {len(chunk)} 页。
 
 {layout_catalog()}
@@ -1315,7 +1328,7 @@ def _plan_batch(chunk: list[dict], src: str, cfg, used: dict, total: int) -> lis
 - **严格遵守该版式的容量上限**（目录里逐条写明了条数与字数）。
 - 内容必须来自源文档，不得编造数字或事实；图表的数据点必须是原文里有的。
 - 每页都要有 source 字段。
-
+{notes_txt}
 只输出 JSON：
 {{"slides": [ {{"layout": "…", ...该版式的字段…}}, ... ]}}
 """
@@ -1483,13 +1496,42 @@ def _heuristic_slide(page: dict, section: str, blocks: list[dict], *,
                 body=[[(p, {'size': 16, 'color': 'MUTED'})] for p in items[:3]], **base)
 
 
+def _fill_header(sl: dict, page: dict, section: str) -> dict:
+    """页眉三件套（`source` / `title` / `kicker`）的回填规则。
+
+    **规划收尾与按页修订共用这一份**。这个仓库里手写清单的漂移已经发生过三次
+    （`layout_spec` 的目录/预算/容量曾经是三份清单，见 README），所以修订
+    路径不再自己抄一遍「statement 要弹掉 title」这类规则。
+
+    注意语义是「**仅当字段为空时**回填」—— 模型或用户给了就用给的。
+    早先的 docstring 写成「无条件回填」，读代码才发现不是（`pipeline.py:1510-1517`
+    的 `if not (...) .strip()`），这个措辞误导过一次判断。
+
+    `section_divider` 不给 kicker：它自己就是章节名，再补一行小字到左上角
+    等于把同一个名字写两遍。
+    """
+    sl = dict(sl)
+    if not (sl.get('source') or '').strip():
+        sl['source'] = (page or {}).get('source') or ''
+    if sl.get('layout') == 'statement':
+        # statement 没有标题位（见 layouts.render_statement），留个 title 反而
+        # 会被 repair 的 _text_len 算进去。这是原有行为，别改。
+        sl.pop('title', None)
+    elif not (sl.get('title') or '').strip():
+        sl['title'] = ((page or {}).get('title') or '').strip()
+    if (sl.get('layout') != 'section_divider'
+            and not (sl.get('kicker') or '').strip() and section):
+        sl['kicker'] = section
+    return sl
+
+
 def _normalise_plan(slides: list[dict], outline: dict, log=None) -> dict:
     """校验版式名、补齐页眉字段，保证 build 一定能渲染。
 
     `title` / `kicker` 是版式级的公共字段：10 个版式都会调 `layouts.header()` 画页眉，
     而 `tokens.header()` 在两者都为空时**什么都不画**。这两个字段一直靠模型自觉产出，
     于是实测所有 LLM 生成的 deck 都是 `has_title=0/N` —— 渲染出来正文页顶部一片空白。
-    所以这里**无条件从大纲回填**：模型给了就用模型的，没给就用大纲的。
+    所以这里**无条件执行回填这一步**：模型给了就用模型的，没给就用大纲的。
     """
     sections, pages = [], []
     for s in outline.get('sections') or []:
@@ -1505,23 +1547,9 @@ def _normalise_plan(slides: list[dict], outline: dict, log=None) -> dict:
             (log or print)('[plan] 第 %d 页版式 %r 未知，改用 statement' % (i, name))
             sl = dict(layout='statement',
                       lines=[[(sl.get('title') or '未命名', {})]])
-        sl = dict(sl)
-        page = pages[i - 1] if i - 1 < len(pages) else {}
-        if not (sl.get('source') or '').strip():
-            sl['source'] = page.get('source') or ''
-        if sl['layout'] == 'statement':
-            # statement 没有标题位（见 layouts.render_statement），留个 title 反而
-            # 会被 repair 的 _text_len 算进去。这是原有行为，别改。
-            sl.pop('title', None)
-        elif not (sl.get('title') or '').strip():
-            sl['title'] = (page.get('title') or '').strip()
-        # 章节隔断页不给 kicker：它自己就是章节名，再补一行小字到左上角
-        # 等于把同一个名字写两遍。
-        if (sl['layout'] != 'section_divider'
-                and not (sl.get('kicker') or '').strip()
-                and i - 1 < len(sections)):
-            sl['kicker'] = sections[i - 1]
-        clean.append(sl)
+        clean.append(_fill_header(
+            sl, pages[i - 1] if i - 1 < len(pages) else {},
+            sections[i - 1] if i - 1 < len(sections) else ''))
     # 目录页的每一行都在这里过一遍 `_toc_line`：前端（`web/app.js`）在用户改动
     # 章节名/页标题时是**本地重拼** toc 的，拼出来的行没有长度上限；而目录页
     # 又在几何检查的 skip 名单里（`qa/geometry.py` 默认跳过第 1/2/最后一页），
