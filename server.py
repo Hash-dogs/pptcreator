@@ -1417,6 +1417,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/api/layouts':
             # 版式清单：内置 + 自定义，带来源、启用状态、预览图 URL 与元数据。
             # 页面上的「查看 / 启用禁用 / 删除」全从这一份渲染。
+            #
+            # 打开页面时**重读一次目录**（`force=True`）：注册表平时只在进程启动时
+            # 加载，手工放进 `layouts_custom/` 或手工改过的 JSON 否则要重启才生效。
+            # 这是用户主动打开页面这个动作带来的副作用，不是后台轮询，代价可忽略。
+            layout_store.load_all(force=True)
             items = []
             custom = {m.get('name'): m for m in layout_store.list_metas()}
             for name in layout_spec.names():
