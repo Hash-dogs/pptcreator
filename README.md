@@ -64,7 +64,7 @@ python run.py config     # 看当前配置状态
 | `PPTGEN_MIN_PAGES` / `PPTGEN_MAX_PAGES` | 13 / 18 | 正文页数区间。**章节分隔页不占这个额度**（见上文 ④） |
 | `PPTGEN_SECTION_DIVIDERS` | `1` | 是否在正文里插入章节分隔页；设 `0` 关掉 |
 | `PPTGEN_OUTLINE_SEGMENT` | `1` | 骨架分不出章 / 分得太碎时，是否让模型把页单元归成几章（见上文 ①″）；设 `0` 关掉，退回纯确定性 |
-| `PPTGEN_CONTENT_MODE` | `balance` | `strict` 只做结构整理 / `balance` 允许合并提炼 / `enrich` 可补写过渡 |
+| `PPTGEN_CONTENT_MODE` | `balance` | `strict` 只做结构整理 / `balance` 允许合并提炼 / `enrich` 可补写过渡。Web 端这一项是**每次现选**的（「内容策略」下拉，初值就是 `.env` 里这个值） |
 | `PPTGEN_OUTLINE_MAX_TOKENS` / `PPTGEN_PLAN_MAX_TOKENS` | 取 `max(PPTGEN_MAX_TOKENS, 16000)` | 两个阶段的输出上限。**推理模型会把额度烧在 reasoning 上**，给小了正文直接为空、静默退回兜底（实测 `deepseek-flash` 给 8000 就烧掉 8000） |
 
 ---

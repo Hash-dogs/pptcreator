@@ -7,7 +7,9 @@
   - 视觉配置留空时可回退用文本模型的 base/key（同一家服务商常共用 key）。
 """
 from __future__ import annotations
+import contextlib
 import os
+import threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ENV_PATH = os.path.join(ROOT, '.env')
@@ -207,9 +209,42 @@ def outline_segment() -> bool:
     return get_bool('PPTGEN_OUTLINE_SEGMENT', True)
 
 
+CONTENT_MODES = ('strict', 'balance', 'enrich')
+
+# 「内容策略」允许在**一次流程内**被临时覆盖 —— Web 前端让人现选一次
+# （见 `web/index.html` 的内容策略下拉），不必改 `.env` 再重启服务。
+# 覆盖挂在**线程局部**上而不是写 `os.environ`：每个任务跑在自己的线程里，
+# 覆盖只作用于这一次流程，并发两个任务互不干扰，CLI 那一侧也永远只读 `.env`。
+_content_local = threading.local()
+
+
+def pick_content_mode(m: str | None) -> str | None:
+    """合法就归一化成小写，否则 None —— 非法值一律静默退回默认口径。"""
+    v = (m or '').strip().lower()
+    return v if v in CONTENT_MODES else None
+
+
 def content_mode() -> str:
-    m = (get('PPTGEN_CONTENT_MODE', 'balance') or 'balance').lower()
-    return m if m in ('strict', 'balance', 'enrich') else 'balance'
+    """内容取舍口径，优先取本次流程的覆盖，其次 `.env` 的 `PPTGEN_CONTENT_MODE`。
+
+    `strict` 只做结构整理 / `balance` 允许合并提炼 / `enrich` 可以补写过渡。
+    它注入**分章提示词**与**一次性大纲提示词**两处 —— 按章分片那条路径不读它，
+    长文档永远按平衡口径生成（见 `docs/程序运行逻辑.md`）。
+    """
+    return (pick_content_mode(getattr(_content_local, 'value', None))
+            or pick_content_mode(get('PPTGEN_CONTENT_MODE'))
+            or 'balance')
+
+
+@contextlib.contextmanager
+def content_mode_override(mode: str | None):
+    """在 `with` 块内把内容策略定成 `mode`（None / 非法值 = 不覆盖，照旧读 `.env`）。"""
+    prev = getattr(_content_local, 'value', None)
+    _content_local.value = mode
+    try:
+        yield content_mode()
+    finally:
+        _content_local.value = prev
 
 
 def out_dir() -> str:

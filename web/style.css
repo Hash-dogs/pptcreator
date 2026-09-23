@@ -187,6 +187,9 @@ select,input[type=text],input[type=number]{
   border-radius:6px; background:#fff; color:var(--dark);
 }
 select{min-width:280px; width:100%; max-width:520px}
+/* 下拉那条宽度是为「选择已有文档」那个整行的选源框定的；挤在 action-settings
+   这一行里的控件按内容宽走，否则内容策略会把整行撑开、按钮被推到换行。 */
+.action-settings select{min-width:0; width:auto; max-width:none}
 input[type=text]{width:150px}
 input[type=number]{width:64px}
 select:disabled,input:disabled{opacity:.5; background:#F7F8FA}

@@ -108,6 +108,12 @@ async function boot() {
     $('acceptHint').textContent = '支持 ' + c.exts.join(' / ') + '，单个不超过 '
       + Math.round(c.max_upload / 1048576) + ' MB';
     $('files').accept = c.exts.join(',');
+    // 内容策略的初值就是 `.env` 里那一份（服务端 /api/config 报的）。只有它确实
+    // 是下拉里的一项才回填 —— 否则 `select.value` 会被设成空串，界面显示着第一项
+    // 而值是空的，提交上去就变成「没选」。
+    if ([...$('contentMode').options].some((o) => o.value === c.mode)) {
+      $('contentMode').value = c.mode;
+    }
     $('cfg').innerHTML =
       '<div>文本模型 <b class="' + (c.llm ? '' : 'off') + '">'
       + esc(c.llm || '未配置') + '</b></div>'
@@ -157,6 +163,11 @@ function setSourceMode(mode) {
 document.querySelectorAll('input[name=sourceMode]').forEach((r) => {
   r.onchange = () => { if (r.checked) setSourceMode(r.value); };
 });
+
+/* 这次流程用的内容策略。下拉里的是**本次流程**的口径，`.env` 一个字都不改 ——
+   服务端把覆盖挂在任务线程的局部变量上（`server._spawn`）。
+   空值（下拉没初始化好或服务端给了个未知值）退回 `balance`，与后端一致。 */
+const contentMode = () => $('contentMode').value || 'balance';
 
 /* 当前选中的源。上传模式下是那枚「使用中」的胶囊，否则是下拉里的文件。 */
 function currentSource() {
@@ -324,7 +335,8 @@ $('btnOutline').onclick = async () => {
   clearJob();
   setStatus('正在解析并生成大纲…', true);
   try {
-    const { job_id } = await api('/api/outline', src);
+    const { job_id } = await api('/api/outline',
+      Object.assign({}, src, { mode: contentMode() }));
     const job = await poll(job_id);
     if (job.error) throw new Error(job.error);
 
@@ -464,6 +476,10 @@ $('btnGenerate').onclick = async () => {
       parsed_path: state.parsedPath,
       name: $('deckName').value || 'deck',
       rounds: +$('rounds').value || 0,
+      // 规划阶段不读这个口径（只有大纲提示词读），带上它是为了让流程日志记的
+      // 配置与实际选的一致 —— 单独一次 /api/generate 接不上大纲那次的日志文件夹时，
+      // `runlog.config_snapshot()` 会现取一次。
+      mode: contentMode(),
     });
     const job = await poll(job_id);
     if (job.error) throw new Error(job.error);

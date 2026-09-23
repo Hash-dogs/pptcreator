@@ -186,6 +186,19 @@ def _job_new() -> str:
     return jid
 
 
+def _spawn(fn, args: tuple, mode: str | None = None):
+    """把一个任务丢进后台线程跑；`mode` 是这次流程选的内容策略。
+
+    覆盖只在**这个线程**里生效（`config.content_mode_override`）—— 任务各跑
+    一个线程，同时跑两个任务时互不干扰，也不会污染 CLI 那一侧的 `.env` 读数。
+    `None` / 非法值 = 不覆盖，仍按 `.env` 的 `PPTGEN_CONTENT_MODE` 走。
+    """
+    def _run():
+        with cfg_mod.content_mode_override(mode):
+            fn(*args)
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _log(jid: str, msg: str, level: str = 'info', detail: str = ''):
     """一条日志同时喂两个视图：`log` 是纯文本（终端的流水），
     `progress` 是结构化的（侧边栏进度面板按 level 上色）。
@@ -1453,9 +1466,8 @@ class Handler(BaseHTTPRequestHandler):
                 src, origin = hit
                 name = os.path.basename(src)
             jid = _job_new()
-            threading.Thread(target=run_outline,
-                             args=(jid, src, data, name, origin, original),
-                             daemon=True).start()
+            _spawn(run_outline, (jid, src, data, name, origin, original),
+                   cfg_mod.pick_content_mode(body.get('mode')))
             return self._json({'job_id': jid})
 
         if p == '/api/generate':
@@ -1473,9 +1485,8 @@ class Handler(BaseHTTPRequestHandler):
             # 带着 `except: pass`，会把失败悄悄吞掉，导致「落盘的那份」和「实际拿去
             # 规划的这份」不一致而没人知道。
             jid = _job_new()
-            threading.Thread(target=run_generate,
-                             args=(jid, outline, parsed_path, name, rounds),
-                             daemon=True).start()
+            _spawn(run_generate, (jid, outline, parsed_path, name, rounds),
+                   cfg_mod.pick_content_mode(body.get('mode')))
             return self._json({'job_id': jid})
 
         if p == '/api/revise':
