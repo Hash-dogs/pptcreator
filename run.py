@@ -42,11 +42,15 @@ for _s in (sys.stdout, sys.stderr):
 
 from pptgen import build as build_mod                      # noqa: E402
 from pptgen import config as cfg_mod                       # noqa: E402
+from pptgen import layout_spec                             # noqa: E402
+from pptgen import layout_store                            # noqa: E402
 from pptgen import parse as parse_mod                      # noqa: E402
 from pptgen import pipeline                                # noqa: E402
+from pptgen import recognize as recognize_mod              # noqa: E402
 from pptgen import repair as repair_mod                    # noqa: E402
 from pptgen import revise as revise_mod                    # noqa: E402
 from pptgen import runlog                                  # noqa: E402
+from pptgen import samples                                 # noqa: E402
 from pptgen.qa import geometry, visual                     # noqa: E402
 
 # 目录常量统一走 config.out_sub()（server.py 用的是同一份）——
@@ -81,6 +85,141 @@ def _abs(p: str) -> str:
 def cmd_config(args):
     cfg_mod.load_env()
     print(cfg_mod.summary())
+
+
+def _layouts_table() -> str:
+    L = ['版式库（%d 套，其中自定义 %d 套）' % (len(layout_spec.names()),
+                                        len([n for n in layout_spec.names()
+                                             if layout_spec.REGISTRY[n].source == 'custom'])),
+         '  %-24s %-6s %-6s %-10s %s' % ('名字', '来源', '状态', '分类', '容量 / 特征')]
+    for name in layout_spec.names():
+        i = layout_store.info(name)
+        L.append('  %-24s %-6s %-6s %-10s %s'
+                 % (name, '自定义' if i['source'] == 'custom' else '内置',
+                    '启用' if i['enabled'] else '禁用',
+                    i['intent_label'], i['items'] or (i['signature'] or '')[:24]))
+    return '\n'.join(L)
+
+
+def _layouts_check() -> int:
+    """自定义版式的样例过一遍「试片闸门」（几何 + 截断）。
+
+    内置 19 套的回归在 `tests/test_layouts.py` 里；**自定义版式没有那份测试**，
+    所以给它们一条能随时跑的自检命令 —— 手工改过 JSON、或者从别处拷来一份
+    版式之后，用它确认还没坏。
+    """
+    names = [n for n in layout_spec.names()
+             if layout_spec.REGISTRY[n].source == 'custom']
+    if not names:
+        print('版式库里还没有自定义版式（内置 19 套的回归在 tests/ 里）。')
+        return 0
+    bad = 0
+    work = os.path.join(VISUAL, 'layouts_check')
+    for name in names:
+        if not layout_spec.is_enabled(name):
+            print('— %s（已禁用，跳过）' % name)
+            continue
+        meta = None
+        for m in layout_store.list_metas():
+            if m.get('name') == name:
+                meta = m
+                break
+        if not meta or not isinstance(meta.get('sample'), dict):
+            print('✗ %s：没有样例（sample），无法自检' % name)
+            bad += 1
+            continue
+        try:
+            trial = recognize_mod.render_trial(meta, os.path.join(work, name))
+            problems = recognize_mod.gate(trial)
+        except Exception as e:                       # noqa: BLE001
+            print('✗ %s：渲染失败 %s' % (name, e))
+            bad += 1
+            continue
+        rep = trial['geometry']['summary']
+        if problems:
+            print('✗ %s：%s' % (name, '；'.join(problems[:3])))
+            bad += 1
+        else:
+            print('✓ %s（几何 %d error / %d warn，无截断）'
+                  % (name, rep['error'], rep['warn']))
+    print()
+    print('自检结果：%d 套有问题' % bad if bad else '自检结果：全部通过')
+    if bad:
+        # 退出码要能传出去（CI / 脚本里判断用）—— main() 不接返回值，只能 SystemExit
+        raise SystemExit(1)
+
+
+def _layouts_add(args) -> int:
+    if cfg_mod.vision_config() is None:
+        raise SystemExit('未配置视觉模型（PPTGEN_VISION_*），无法识别截图。\n'
+                         '识别要用**看得见图**的模型，见 .env.example 的 2.4 节。')
+    img = _abs(args.add_image)
+    if not os.path.isfile(img):
+        raise SystemExit('图片不存在：%s' % img)
+    print('识别中…（调用视觉模型，可能要十几秒）')
+    draft = recognize_mod.recognize(img, os.path.join(VISUAL, 'layouts_cli'),
+                                    on_log=lambda m: print('  ' + m))
+    if not draft['ok']:
+        print()
+        print('不合格，未入库：%s' % draft['reason'])
+        for a in draft['attempts']:
+            print('  第 %d 轮：%s' % (a['round'], '；'.join(a['problems'])))
+        raise SystemExit(1)
+    meta = draft['meta']
+    print()
+    print('识别通过：%s' % meta['name'])
+    if draft['attempts']:
+        # 重试过就要说出来 —— 静默重试与静默截断是同一类问题（本仓库反复在修）。
+        # 它也是**调提示词的线索**：如果每一张图的第一轮都栽在同一件事上，
+        # 该改的是提示词而不是让模型多试几次。
+        for a in draft['attempts']:
+            print('  ⚠ 第 %d 轮不合格（已自动修正）：%s'
+                  % (a['round'], '；'.join(a['problems'][:2])))
+    print('  视觉特征：%s' % meta['signature'])
+    print('  分类    ：%s' % '、'.join(meta['intents']) or '—')
+    print('  容量    ：%s–%s 条，单条 ≤%s 字'
+          % (meta['min_items'], meta['max_items'], meta['item_chars']))
+    print('  试片    ：%s' % ((draft['trial'] or {}).get('png') or '（未渲染）'))
+    if not args.adopt:
+        print()
+        print('加 `--adopt` 就把它写进版式库；不加则只是看一眼。')
+        return 0
+    path = layout_store.save_meta(meta)
+    print()
+    print('已入库：%s' % path)
+    return 0
+
+
+def cmd_layouts(args) -> int:
+    """版式库管理：查看 / 启停 / 删除 / 自检 / 从截图添加。"""
+    cfg_mod.load_env()
+    if args.enable or args.disable:
+        name = args.enable or args.disable
+        try:
+            layout_store.set_enabled(name, bool(args.enable))
+        except ValueError as e:
+            raise SystemExit(str(e))
+        print('%s %s（下次生成生效；旧 PPT 不受影响）'
+              % ('已启用' if args.enable else '已禁用', name))
+        return 0
+    if args.rm:
+        try:
+            removed = layout_store.remove_meta(args.rm)
+        except ValueError as e:
+            raise SystemExit(str(e))
+        if not removed:
+            # 注册表里有、文件却不在：这种情况说明目录被手工动过
+            raise SystemExit('%s 的声明文件不在版式目录里，没能删掉' % args.rm)
+        print('已删除 %s' % args.rm)
+        return 0
+    if args.check:
+        return _layouts_check()
+    if args.add_image:
+        return _layouts_add(args)
+    print(_layouts_table())
+    print()
+    print('版式目录：%s' % layout_store.directory())
+    return 0
 
 
 def cmd_parse(args):
@@ -542,6 +681,17 @@ def main():
 
     sub.add_parser('config', help='查看配置状态')
 
+    p = sub.add_parser('layouts', help='版式库：查看 / 启停 / 删除 / 自检 / 从截图添加')
+    p.add_argument('--list', action='store_true', help='列出版式（不带参数时的默认行为）')
+    p.add_argument('--enable', metavar='名字', help='启用一套版式（内置也可以）')
+    p.add_argument('--disable', metavar='名字', help='禁用一套版式：不再被选中，旧 PPT 仍能渲染')
+    p.add_argument('--rm', metavar='名字', help='删除一套**自定义**版式（内置的只能禁用）')
+    p.add_argument('--check', action='store_true',
+                   help='自定义版式的样例过一遍几何 + 截断自检')
+    p.add_argument('--add-image', metavar='图片', help='从一张版式截图识别新版式')
+    p.add_argument('--adopt', action='store_true',
+                   help='配合 --add-image：识别通过就直接入库（不加则只看一眼）')
+
     p = sub.add_parser('parse', help='解析源文档')
     p.add_argument('--src', required=True)
     p.add_argument('--out')
@@ -619,7 +769,8 @@ def main():
             {'config': cmd_config, 'parse': cmd_parse, 'outline': cmd_outline,
              'plan': cmd_plan, 'build': cmd_build, 'repair': cmd_repair,
              'full': cmd_full, 'qa': cmd_qa, 'render': cmd_render,
-             'all': cmd_all, 'auto': cmd_auto, 'revise': cmd_revise}[args.cmd](args)
+             'all': cmd_all, 'auto': cmd_auto, 'revise': cmd_revise,
+             'layouts': cmd_layouts}[args.cmd](args)
         if rl.dir:
             print()
             print('[log] %s' % rl.dir)

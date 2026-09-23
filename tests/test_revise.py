@@ -535,7 +535,7 @@ class TestCatalogFor(unittest.TestCase):
         self.assertIn('numbered_columns', txt)
         self.assertIn('items', txt)
         self.assertIn('必填', txt)
-        # 只发这一套 —— 不能把 19 套目录（5000 多字符）全带上
+        # 只发这一套 —— 不能把整个版式库的目录（5000 多字符）全带上
         self.assertLess(len(txt), 600)
         self.assertNotIn('metric_trend', txt)
 

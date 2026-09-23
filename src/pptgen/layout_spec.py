@@ -14,7 +14,7 @@
 
 另外两个机制借鉴自开源方案（PPTAgent 与 gpt-image2-ppt-skills）：
 
-- **意图映射 + 候选收缩**：先用 `page_role` / `content_intent` 把 19 套收窄到 2–4 个
+- **意图映射 + 候选收缩**：先用 `page_role` / `content_intent` 把版式库收窄到 2–4 个
   候选，再让模型在候选内选。让模型从全部版式里盲选，是「大纲写『六参数对比表』、
   规划却选了 timeline_vertical」这类错配的温床。
 - **容量前置校验**：条目数不落在 `[min_items, max_items]` 内的版式**直接剔除**，
@@ -51,6 +51,10 @@ INTENT_LABELS = {
     'quote':        '引语（一句被引用的话）',
 }
 
+# 短标签：`INTENT_LABELS` 里括号前那一截。给表格列、卡片角标这类窄地方用。
+# 收在这里是因为 gallery.py 与 Web 的版式卡片都要它 —— 各切一次就是两处漂移。
+INTENT_SHORT = {k: v.split('（')[0] for k, v in INTENT_LABELS.items()}
+
 
 @dataclass(frozen=True)
 class LayoutSpec:
@@ -58,6 +62,9 @@ class LayoutSpec:
     name: str
     roles: tuple[str, ...]              # 适用的 page_role
     intents: tuple[str, ...] = ()       # 适用的 content_intent（空 = 只按角色用）
+    # 来源：内置（`layouts.py` 里的渲染函数）还是自定义（`layouts_custom/*.json`）。
+    # 内置的可以禁用、不能删除；自定义的两者都可以（见 layout_store）。
+    source: str = 'builtin'
     # ── 容量（程序校验，不是靠模型自觉）──────────────────────
     min_items: int | None = None        # 主列表条目数下限
     max_items: int | None = None        # 上限 —— 超出直接剔除该版式
@@ -130,11 +137,46 @@ def _ensure_loaded() -> None:
         return
     _LOADED = True
     from . import layouts  # noqa: F401  （导入即注册）
+    # 自定义版式（`layouts_custom/*.json`）也在这里挂上。注册表是「本版有哪些版式」
+    # 的唯一真相来源，所以只 import layout_spec 的调用方也该看到用户加的那些 ——
+    # 漏掉这一步的表现是「版式文件在、图鉴里也有，但规划阶段永远选不到它」。
+    from . import layout_store
+    layout_store.load_all()
 
 
 def register(spec: LayoutSpec) -> LayoutSpec:
     REGISTRY[spec.name] = spec
     return spec
+
+
+# ── 启用 / 禁用 ────────────────────────────────────────────────
+# **禁用 ≠ 删除**：被禁用的版式不进候选、不进给模型的目录，但它的渲染函数还在，
+# 于是**旧 deck 照样能渲染、能按页修订**（`revise.check_deck_layouts` 也是按
+# `names()` 判定的，那里要看得见全部）。真正删掉自定义版式才会让旧 deck 打不开 ——
+# 那条路只在 layout_store.remove() 里走，且只对自定义版式开放。
+#
+# 状态由 `layout_store` 从 `layouts_custom/_state.json` 读出来后灌进来；
+# 这一层**不碰文件系统**（它被到处 import，不该有 I/O 副作用）。
+_DISABLED: set[str] = set()
+
+
+def set_disabled(names) -> None:
+    global _DISABLED
+    _DISABLED = {str(n) for n in (names or ())}
+
+
+def disabled_names() -> set[str]:
+    _ensure_loaded()          # 启用状态是**加载时**从 layouts_custom/_state.json 读的
+    return set(_DISABLED)
+
+
+def is_enabled(name: str) -> bool:
+    # ⚠️ 必须确保已加载：`_DISABLED` 要等 `_ensure_loaded()` 跑过才有值，否则
+    # 在一个「还没读过注册表」的新进程里，这里会对一个其实被禁用的版式返回 True
+    # （实测：`is_enabled('statement')` 说启用，而 `candidates()` 里没有它 ——
+    # 同一个进程里两个答案，最难查的那种）。
+    _ensure_loaded()
+    return name not in _DISABLED
 
 
 def get(name: str) -> LayoutSpec | None:
@@ -207,11 +249,13 @@ def _capacity_ok(sp: LayoutSpec, shape: dict) -> bool:
 
 
 def candidates(role: str, intent: str, shape: dict | None = None) -> list[LayoutSpec]:
-    """按角色 + 意图 + 内容形态，把 19 套收窄成候选集。"""
+    """按角色 + 意图 + 内容形态，把版式库收窄成候选集（**不含被禁用的**）。"""
     _ensure_loaded()
     shape = shape if shape is not None else EMPTY_SHAPE
     out = []
     for sp in REGISTRY.values():
+        if not is_enabled(sp.name):
+            continue
         if role == 'section':
             # 结构页只由结构版式承担，且不参与内容驱动的选择
             if sp.roles == ('section',):
@@ -269,7 +313,7 @@ def resolve(sp: LayoutSpec | None, role: str, intent: str,
         if s is None or s.name in seen:
             return None
         seen.add(s.name)
-        if s.name not in take:
+        if s.name not in take and is_enabled(s.name):
             return s
         for nxt in s.fallback:
             got = walk(REGISTRY.get(nxt))
@@ -285,7 +329,10 @@ def resolve(sp: LayoutSpec | None, role: str, intent: str,
     for s in pool:
         if s.name not in take:
             return s
-    return REGISTRY.get('statement') or LayoutSpec(name='statement', roles=('content',))
+    if pool:                       # 全被 take 占满也认了，总比返回一个禁用的好
+        return pool[0]
+    return (REGISTRY.get('statement')
+            or LayoutSpec(name='statement', roles=('content',)))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -301,9 +348,13 @@ def catalog_text() -> str:
          '  source —— 页脚来源标注。',
          '',
          '可用版式（layout 字段填左边的名字）：', '']
-    for i, sp in enumerate(REGISTRY.values(), 1):
+    n = 0
+    for sp in REGISTRY.values():
+        if not is_enabled(sp.name):
+            continue              # 禁用的版式不进目录：选了也用不了，白占 token
+        n += 1
         rng = sp.item_range()
-        head = '%d. %s —— %s' % (i, sp.name, sp.signature or sp.best_for)
+        head = '%d. %s —— %s' % (n, sp.name, sp.signature or sp.best_for)
         L.append(head)
         if rng:
             L.append('   容量：%s。' % rng)
@@ -337,7 +388,7 @@ def candidate_text(names: list[str]) -> str:
 def catalog_for(name: str) -> str:
     """**单个**版式的字段契约（按页修订用）。
 
-    修订一次只动一页，没必要把 19 套版式的目录（5000 多字符）全发过去 ——
+    修订一次只动一页，没必要把整个版式库的目录（5000 多字符）全发过去 ——
     那既费 token，也让模型在无关版式里分心。与 `catalog_text` 同源，
     只是取其中一项。
     """
@@ -366,5 +417,17 @@ def capacity_text(name: str) -> str:
 
 
 def names() -> list[str]:
+    """**全部**版式名（含被禁用的）。
+
+    这个「含被禁用的」是有意的：`revise.check_deck_layouts` 拿它判断「这份旧 deck
+    的版式本版还认不认」—— 被禁用的版式渲染函数还在，旧 deck 照样要能打开。
+    要「能选的」用 `enabled_names()`。
+    """
     _ensure_loaded()
     return list(REGISTRY)
+
+
+def enabled_names() -> list[str]:
+    """当前可被选中的版式名（禁用的剔除）。"""
+    _ensure_loaded()
+    return [n for n in REGISTRY if is_enabled(n)]

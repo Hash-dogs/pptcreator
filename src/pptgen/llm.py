@@ -84,11 +84,13 @@ def ask_text(prompt: str, cfg: config.LLMConfig | None = None,
                              config.get_int('PPTGEN_RETRY', 2)))
 
 
-def ask_json(prompt: str, cfg: config.LLMConfig | None = None,
-             system: str | None = None, **kw) -> dict:
-    """要求模型输出 JSON，并做一次宽容解析（剥 ``` 围栏 / 截取最外层大括号）。"""
-    raw = ask_text(prompt, cfg, system, json_mode=True, **kw)
-    txt = raw.strip()
+def parse_json(raw: str) -> dict:
+    """宽容解析模型返回的 JSON（剥 ``` 围栏 / 截取最外层大括号 / 裸数组包一层）。
+
+    抽成公开函数是因为**视觉调用也要它** —— `ask_vision` 走 `response_format`
+    在某些服务上不生效，返回的仍可能是带围栏的文本。
+    """
+    txt = (raw or '').strip()
     if txt.startswith('```'):
         txt = txt.split('\n', 1)[1] if '\n' in txt else txt
         txt = txt.rsplit('```', 1)[0]
@@ -111,22 +113,46 @@ def ask_json(prompt: str, cfg: config.LLMConfig | None = None,
     raise LLMError('模型未返回可解析的 JSON：%s' % raw[:400])
 
 
+def ask_json(prompt: str, cfg: config.LLMConfig | None = None,
+             system: str | None = None, **kw) -> dict:
+    """要求模型输出 JSON，并做一次宽容解析（剥 ``` 围栏 / 截取最外层大括号）。"""
+    return parse_json(ask_text(prompt, cfg, system, json_mode=True, **kw))
+
+
+# 图片扩展名 → MIME。**不能一律当 PNG**：用户上传的版式截图多是 jpg/png/webp，
+# data URL 里写错类型，有的服务端会直接报「不支持的图片格式」。
+_MIME = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+         '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp'}
+
+
 def _b64(path: str) -> str:
     with open(path, 'rb') as f:
         return base64.b64encode(f.read()).decode('ascii')
 
 
+def _data_url(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    return 'data:%s;base64,%s' % (_MIME.get(ext, 'image/png'), _b64(path))
+
+
 def ask_vision(prompt: str, image_paths: list[str],
                cfg: config.LLMConfig | None = None, *,
-               max_tokens: int | None = None) -> str:
+               max_tokens: int | None = None, json_mode: bool = False) -> str:
     cfg = cfg or config.vision_config()
     if cfg is None:
         raise LLMError('未配置视觉模型（PPTGEN_VISION_*）')
     content = [{'type': 'text', 'text': prompt}]
     for p in image_paths:
-        content.append({'type': 'image_url',
-                        'image_url': {'url': 'data:image/png;base64,' + _b64(p)}})
+        content.append({'type': 'image_url', 'image_url': {'url': _data_url(p)}})
     payload = {'model': cfg.model, 'max_tokens': max_tokens or default_max_tokens(),
                'messages': [{'role': 'user', 'content': content}]}
+    if json_mode:
+        payload['response_format'] = {'type': 'json_object'}
     return _content_of(_post(payload, cfg, config.get_int('PPTGEN_TIMEOUT', 180),
                              config.get_int('PPTGEN_RETRY', 2)))
+
+
+def ask_vision_json(prompt: str, image_paths: list[str],
+                    cfg: config.LLMConfig | None = None, **kw) -> dict:
+    """视觉 + JSON：识别版式结构走这条（返回结构不符合预期时由调用方重试）。"""
+    return parse_json(ask_vision(prompt, image_paths, cfg, json_mode=True, **kw))

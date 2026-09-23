@@ -33,6 +33,10 @@ Y_CONTENT = 2.00
 Y_CONTENT_BOTTOM = 6.95
 Y_SOURCE = 6.78
 Y_PAGENUM = 7.18
+# **正文的实际下界**，比 `Y_CONTENT_BOTTOM` 更保守：留到 6.60 而不是 6.95 ——
+# 来源行在 6.78，内容压过它会被几何检查的 text_overlap 抓到
+# （`comparison_rows` 早先就是这么撞上的）。19 套内置版式与声明式版式共用这一个。
+Y_BOTTOM = 6.60
 
 # ── 品牌色（取自模板 theme1.xml 的 clrScheme）─────────────────
 RED   = RGBColor(0xD3, 0x12, 0x45)   # accent1 —— 强调，只打在单一焦点上
@@ -71,6 +75,9 @@ def _rect(slide, x, y, w, h, color, *, outline=False, radius=None):
        都变成覆盖整页的色块。**officecli 的 view issues 查不出这个**（它只检查是否
        越过右边界），只有自写的边界扫描能抓到。所以：这里只接受英寸，转换在调用方做。
     """
+    # 颜色可以是令牌名（`'RULE'` / `'TINT'` / …）—— 声明式版式的颜色写在 JSON 里，
+    # 只能是名字，所以把解析收在这一层（`put` 对 run 颜色早就是这么做的）。
+    color = resolve_color(color)
     kind = MSO_SHAPE.ROUNDED_RECTANGLE if radius else MSO_SHAPE.RECTANGLE
     sh = slide.shapes.add_shape(kind, Inches(x), Inches(y), Inches(w), Inches(h))
     if outline:
@@ -110,6 +117,80 @@ def tint_band(slide, y, h, color=TINT):
     return _rect(slide, 0, y, CANVAS_W, h, color)
 
 
+def table(slide, x, y, w, h, data, *, col_widths=None, font=13.5,
+          header_font=None, header_h=0.52, row_h=None, min_row_h=0.0,
+          margin=(0.12, 0.06)):
+    """原生 PowerPoint 表格。`data` 的**第一行是表头**。
+
+    这段代码原先在 `layouts.py` 里有两份几乎相同的拷贝（`data_table` 与
+    `split_main_aside` 的辅区表），差异只有字号、边距与表头高度 —— 抽到这里
+    之后三处共用（含声明式版式的表格块），调一处就三处都动。
+
+      col_widths  None → 各列等分；给了就按英寸逐列设（**不校验合计**，
+                  调用方负责 `sum == w`，否则表格宽度会与框不符）
+      font        正文字号；header_font 缺省取 `font - 0.5`
+      header_h    表头行高
+      row_h       正文行高；None → 表头之外剩余高度等分
+      min_row_h   正文行高的下限（辅区那张小表用它撑住 0.30"）
+      margin      (左右, 上下) 单元格内边距，英寸
+
+    两处**故意的**设计，别改回去：
+    - 表头底色是近黑 `DARK` 而不是 accent4 蓝 —— 模板自己的页面从不用蓝
+      （theme1 里 accent4 只出现在一个空段落的 endParaRPr 上，是残留不是设计）。
+    - 首列与正文同为 `DARK`，层级只靠加粗区分 —— 首列原先是蓝色，等于在正文区
+      又开了一个色相。
+    """
+    data = [list(r) for r in (data or [])]
+    if not data or not data[0]:
+        return None
+    nc = len(data[0])
+    # 行短了补空、长了截断：表格的行列出自模型，长度对不齐是常态，
+    # 让它在 `cell(r, c)` 上抛 IndexError 会把整页渲染带塌。
+    for r, row in enumerate(data):
+        row = list(row)[:nc]
+        data[r] = row + [''] * (nc - len(row))
+    nr = len(data)
+
+    gf = slide.shapes.add_table(nr, nc, Inches(x), Inches(y),
+                                Inches(w), Inches(h))
+    tb = gf.table
+    tb.first_row = False
+    tb.horz_banding = False
+    widths = list(col_widths) if col_widths else [w / nc] * nc
+    for i in range(nc):
+        tb.columns[i].width = Inches(widths[i] if i < len(widths) else w / nc)
+    tb.rows[0].height = Inches(header_h)
+    body_h = row_h if row_h is not None else (h - header_h) / max(nr - 1, 1)
+    body_h = max(body_h, min_row_h)
+    for r in range(1, nr):
+        tb.rows[r].height = Inches(body_h)
+
+    hf = font - 0.5 if header_font is None else header_font
+    for r in range(nr):
+        for c in range(nc):
+            cell = tb.cell(r, c)
+            cell.margin_left = cell.margin_right = Inches(margin[0])
+            cell.margin_top = cell.margin_bottom = Inches(margin[1])
+            cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = DARK if r == 0 else WHITE
+            tf = cell.text_frame
+            tf.word_wrap = True
+            p = tf.paragraphs[0]
+            p.alignment = PP_ALIGN.LEFT
+            run = p.add_run()
+            run.text = _as_text(data[r][c])
+            run.font.size = Pt(hf if r == 0 else font)
+            run.font.bold = (r == 0) or (c == 0)
+            run.font.color.rgb = WHITE if r == 0 else DARK
+            run.font.name = LAT
+            rPr = run._r.get_or_add_rPr()
+            el = rPr.makeelement(qn('a:ea'), {})
+            el.set('typeface', EA)
+            rPr.append(el)
+    return gf
+
+
 PALETTE = None  # 延迟填充，避免与上面的常量定义顺序耦合
 
 
@@ -144,13 +225,96 @@ def _as_text(v) -> str:
     return '' if v is None else str(v)
 
 
-def put(slide, x, y, w, h, paras, *, align=PP_ALIGN.LEFT,
+def runs(runs_):
+    """把一段文字里的 run 转成 `[(text, opts), ...]`，并处理 hl 强调色。
+
+    **模型的富文本写法比契约自由得多**，实测三种都出现过：
+
+        [("文本", {"hl": true})]            标准写法
+        [["文本", {"hl": true}]]            用 list 而不是 tuple
+        [{"text": "文本", "hl": true}]      用 dict 描述一个 run
+
+    三种都要吃下来。渲染层崩在模型输出上，比渲染得难看糟得多 ——
+    `_as_text` 早就为同样的理由做过了容错，这里补齐。
+
+    原先是 `layouts.py` 的私有函数，上提到这里是因为**声明式版式（自定义版式的
+    渲染路径）要跟 19 套内置版式共用同一份容错** —— 复制一份就是两处漂移的开端。
+    """
+    if isinstance(runs_, (str, dict)):
+        runs_ = [runs_]
+    runs_ = list(runs_)
+    # 形如 ["文本", {"hl": true}] 是**一个 run 被写成了 list**，不是「两个 run」。
+    # 判据：两元素、首个是字符串、次个是 dict 且自身不带 text。
+    if (len(runs_) == 2 and isinstance(runs_[0], str)
+            and (runs_[1] is None or (isinstance(runs_[1], dict)
+                                     and 'text' not in runs_[1]))):
+        runs_ = [(runs_[0], runs_[1] or {})]
+    out = []
+    for r in runs_:
+        if isinstance(r, str):
+            txt, o = r, {}
+        elif isinstance(r, dict):
+            # {"text": "...", "hl": true} —— 除 text 外的键都当 opts
+            o = {k: v for k, v in r.items() if k != 'text'}
+            txt = r.get('text', '')
+        elif isinstance(r, (list, tuple)):
+            txt = r[0] if len(r) else ''
+            o = dict(r[1]) if len(r) > 1 and isinstance(r[1], dict) else {}
+        else:
+            txt, o = str(r), {}
+        o = dict(o)
+        if o.pop('hl', False):
+            o['color'] = RED
+            o.setdefault('bold', True)
+        out.append((txt, o))
+    return out
+
+
+def paras(lines):
+    """lines → 段落列表，每段是 run 列表。
+
+    层级判定（沿用契约里的约定：**tuple 是 run，list 是段落**）：
+
+        全是 tuple       → 这是**一段**的 run 列表（`aside: [(文本,{}), ...]` 就这么写）
+        全是字符串       → 每串各自一段（`body: ["第一段", "第二段"]`）
+        全是 dict        → 一段、多个 run（`[{"text":…},{"text":…}]`）
+        其余（子列表）   → 每个子列表是一段（`[["文本",{"hl":true}]]` 即一段一 run）
+
+    ⚠️ 早先只认「`lines[0]` 是不是 tuple」，于是模型用 **list** 写单段时整段崩掉 ——
+    实测 `aside: [["GitHub 60,000+ Star", {"hl": true}]]` 抛
+    `ValueError: too many values to unpack`。现在那个形态由 `runs` 的
+    「一个 run 写成了 list」判据接住。
+    """
+    if isinstance(lines, str):
+        return [[(lines, {})]]
+    if isinstance(lines, dict):
+        return [runs([lines])]
+    if not isinstance(lines, (list, tuple)):
+        return [[(str(lines), {})]]
+    items = list(lines)
+    if not items:
+        return []
+    if all(isinstance(x, tuple) for x in items):
+        return [runs(items)]
+    if all(isinstance(x, str) for x in items):
+        return [[(x, {})] for x in items]
+    if all(isinstance(x, dict) for x in items):
+        return [runs(items)]
+    return [runs(x) if isinstance(x, (list, tuple)) else [(str(x), {})]
+            for x in items]
+
+
+def put(slide, x, y, w, h, lines, *, align=PP_ALIGN.LEFT,
         anchor=MSO_ANCHOR.TOP, ls=None, sa=None):
     """写文本。
 
-    paras 结构：`[[(text, opts), ...], ...]`
+    lines 结构：`[[(text, opts), ...], ...]`
       外层 = 段落，内层 = 段内的 run。
       opts 支持 size / bold / color（颜色对象或令牌名）/ ea / lat。
+
+    ⚠️ 形参**不叫** `paras` —— 那个名字被本模块的同名归一函数占着，
+    在这里遮住它，将来在函数体里调 `paras()` 只会得到一句莫名其妙的
+    TypeError。归一用 `paras()`（把任意写法收成这个结构）。
     """
     tb = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
     tf = tb.text_frame
@@ -159,7 +323,7 @@ def put(slide, x, y, w, h, paras, *, align=PP_ALIGN.LEFT,
     for m in ('margin_left', 'margin_right', 'margin_top', 'margin_bottom'):
         setattr(tf, m, 0)
     first = True
-    for para in paras:
+    for para in lines:
         p = tf.paragraphs[0] if first else tf.add_paragraph()
         first = False
         p.alignment = align
@@ -249,6 +413,15 @@ def fit_one_line(text: str, max_in: float, size_pt: float, lines: int = 1) -> st
     if cut:
         TRUNCATIONS.append((str(text), out))
     return out
+
+
+def cut_silent(text: str, max_in: float, size_pt: float, lines: int = 1) -> str:
+    """同 `fit_one_line`，但**不记账**。
+
+    给「调用方要自己记一条更完整的截断记录」的场合用（`fit_block` 记的是整段原文，
+    而不是只剩一行的末行）—— 记两条一样的没有意义。
+    """
+    return _cut(str(text), max_in, size_pt, lines)[0]
 
 
 # ── 折行（标题这类**可以占两行**的框用它，而不是截断）───────────

@@ -26,6 +26,55 @@ sys.path.insert(0, os.path.join(ROOT, 'src'))
 from pptgen import config                                 # noqa: E402
 
 
+class TestVisionModelGuard(unittest.TestCase):
+    """「已知看不见图」名单**只提醒，不否决配置**。
+
+    这条曾经是一道硬拦截：`PPTGEN_VISION_MODEL` 命中名单就 `vision_config()`
+    返回 None。后果实测过 —— `.env` 里配得好好的视觉模型被判成「未配置」，
+    `run.py config` 报「看图输出人工复核包」，用户看到的是「我明明配了」。
+    名单里那个名字（`deepseek-flash`）在他的部署里就是能看图的。
+
+    要保住的是**防静默**那一半：命中名单时要有一句可听见的提醒。
+    """
+
+    ENV = {
+        'PPTGEN_VISION_BASE_URL': 'https://example.invalid/v1',
+        'PPTGEN_VISION_API_KEY': 'k',
+        'PPTGEN_VISION_MODEL': 'deepseek-flash',
+    }
+
+    def test_explicit_model_wins_over_the_blacklist(self):
+        with mock.patch.dict(os.environ, self.ENV):
+            cfg = config.vision_config()
+            self.assertIsNotNone(cfg, '显式配了视觉模型名就不该被判成未配置')
+            self.assertEqual(cfg.model, 'deepseek-flash')
+
+    def test_blacklisted_model_gets_a_visible_warning(self):
+        with mock.patch.dict(os.environ, self.ENV):
+            self.assertTrue(config.vision_warning())
+            self.assertIn('deepseek-flash', config.vision_warning())
+
+    def test_capable_model_has_no_warning(self):
+        with mock.patch.dict(os.environ, dict(self.ENV,
+                                              PPTGEN_VISION_MODEL='qwen-vl-max')):
+            self.assertTrue(config.vision_capable('qwen-vl-max'))
+            self.assertEqual(config.vision_warning(), '')
+
+    def test_no_model_name_still_means_no_vision(self):
+        """名单最初要拦的是**这个**：没给视觉模型名时别拿文本模型顶上去。
+
+        早先回退分支会直接返回文本模型配置，于是看不见图的模型被当视觉模型调用，
+        返回一段像样的文字、看起来像「看图通过」。
+        """
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith('PPTGEN_VISION_')}
+        env['PPTGEN_LLM_BASE_URL'] = 'https://example.invalid/v1'
+        env['PPTGEN_LLM_API_KEY'] = 'k'
+        env['PPTGEN_LLM_MODEL'] = 'deepseek-flash'
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertIsNone(config.vision_config())
+
+
 class ContentMode(unittest.TestCase):
     def setUp(self):
         # 真实 `.env` 已经由别的模块 `load_env()` 进 `os.environ` 了，

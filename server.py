@@ -40,12 +40,17 @@ for _s in (sys.stdout, sys.stderr):
 
 from pptgen import build as build_mod          # noqa: E402
 from pptgen import config as cfg_mod           # noqa: E402
+from pptgen import layout_spec                 # noqa: E402
+from pptgen import layout_store                # noqa: E402
 from pptgen import parse as parse_mod          # noqa: E402
 from pptgen import pipeline                    # noqa: E402
+from pptgen import recognize as recognize_mod  # noqa: E402
 from pptgen import repair as repair_mod        # noqa: E402
 from pptgen import revise as revise_mod        # noqa: E402
 from pptgen import runlog as runlog_mod        # noqa: E402
+from pptgen import samples                     # noqa: E402
 from pptgen.qa import geometry                 # noqa: E402
+from pptgen.qa import visual as visual_mod     # noqa: E402
 
 WEB = os.path.join(ROOT, 'web')
 # 与 run.py 共用同一份定义（config.out_sub），别再各写一份 `out/<sub>`。
@@ -61,6 +66,15 @@ LOGS = cfg_mod.log_root()
 
 SOURCE_EXT = ('.pptx', '.docx', '.pdf', '.txt', '.md', '.markdown')
 MAX_UPLOAD = 40 * 1024 * 1024          # 单文件上限 40MB
+
+# ── 版式管理（自定义版式：识别 / 采用 / 启停 / 删除）──────────
+# 版式预览图落在 `out/visual/_layouts/<版式名>/page-03.png`：现成的 `/preview/`
+# 路由服务的就是 out/visual 下的文件，不必再加一条静态路由。
+LAYOUT_VISUAL = os.path.join(VISUAL, '_layouts')
+SHOTS = os.path.join(UPLOADS, '_layout_shots')      # 上传的版式截图
+SHOT_EXT = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+PAGE = recognize_mod.FIRST_CONTENT_PAGE             # 单页 deck 里正文那一页
+DRAFT_SUFFIX = 'layout-%s.json'                     # 识别草稿（刷新后还能接上）
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
@@ -1310,6 +1324,42 @@ class Handler(BaseHTTPRequestHandler):
             _evict_mem()
         return self._json(dict(id=uid, name=os.path.basename(path), size=len(data)))
 
+    def _upload_shot(self, u):
+        """接一张**版式截图**（原始二进制 body），存下并起一个识别任务。
+
+        为什么不复用 `/api/upload`：那个入口按 `SOURCE_EXT` 白名单收敛扩展名
+        （.pptx/.docx/.pdf/…），图片一律被拒 —— 它是「源文档」的入口。
+        截图是另一类输入，单独一个入口比放宽白名单清楚。
+        """
+        raw = (urllib.parse.parse_qs(u.query).get('name') or [''])[0]
+        base = os.path.basename(urllib.parse.unquote(raw).replace('\\', '/'))
+        ext = os.path.splitext(base)[1].lower()
+        if ext not in SHOT_EXT:
+            return self._json({'error': '请上传图片（%s）' % '、'.join(SHOT_EXT)}, 400)
+        # 只留安全字符：文件名会当路径分量，也可能进日志
+        base = re.sub(r'[^\w.\-]+', '_', base)[:60] or ('shot' + ext)
+
+        n = int(self.headers.get('Content-Length') or 0)
+        if n <= 0:
+            return self._json({'error': '空请求体'}, 400)
+        if n > MAX_UPLOAD:
+            return self._json({'error': '图片太大：%.1f MB，上限 %d MB'
+                               % (n / 1048576.0, MAX_UPLOAD // 1048576)}, 413)
+        data = self._read_exact(n)
+        if len(data) != n:
+            return self._json({'error': '请求体不完整'}, 400)
+
+        os.makedirs(SHOTS, exist_ok=True)
+        path = _unique_path(os.path.join(SHOTS, base))
+        with open(path, 'wb') as f:
+            f.write(data)
+
+        jid = _job_new()
+        # 识别不用内容策略（那份覆盖只影响大纲/规划），所以不起 `_spawn`
+        threading.Thread(target=run_recognize_layout,
+                         args=(jid, path, os.path.basename(path)), daemon=True).start()
+        return self._json({'job_id': jid, 'name': os.path.basename(path)})
+
     # ── 路由 ──────────────────────────────────────────────────
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
@@ -1317,6 +1367,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if p in ('/', '/index.html'):
             return self._file(os.path.join(WEB, 'index.html'), 'text/html; charset=utf-8')
+        if p in ('/layouts', '/layouts.html'):
+            # 版式管理页：查看图鉴 / 增删启停 / 上传截图识别新版式。
+            # 独立页面而不是塞进主页 —— 主页是一条「选源 → 大纲 → 生成 → 按页改」
+            # 的流水线，版式管理跟那条线没有前后关系。
+            return self._file(os.path.join(WEB, 'layouts.html'),
+                              'text/html; charset=utf-8')
         if p.startswith('/static/'):
             f = _safe_join(WEB, p[len('/static/'):])
             return (self._file(f) if f else self._json({'error': 'not found'}, 404))
@@ -1328,6 +1384,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(dict(
                 llm=(llm.model if llm else None),
                 vision=(vis.model if vis else None),
+                # 视觉模型名可疑时的一句提醒（名单只提醒、不否决配置）
+                vision_note=cfg_mod.vision_warning(),
                 pages=[lo, hi], mode=cfg_mod.content_mode(),
                 template=os.path.basename(cfg_mod.template_path()),
                 officecli=_officecli_ok(),
@@ -1357,6 +1415,37 @@ class Handler(BaseHTTPRequestHandler):
             # 要回给前端的只有下面这几个键。
             return self._json({k: v for k, v in j.items() if not k.startswith('_')
                                and k != 'runlog'})
+
+        if p == '/api/layouts':
+            # 版式清单：内置 + 自定义，带来源、启用状态、预览图 URL 与元数据。
+            # 页面上的「查看 / 启用禁用 / 删除」全从这一份渲染。
+            items = []
+            custom = {m.get('name'): m for m in layout_store.list_metas()}
+            for name in layout_spec.names():
+                info = layout_store.info(name)
+                info['preview'] = _preview_url(name)
+                if info['source'] == 'custom':
+                    meta = custom.get(name) or {}
+                    info['blocks'] = len(meta.get('blocks') or [])
+                    info['origin'] = (meta.get('origin') or {}).get('from') or 'image'
+                    info['notes'] = meta.get('_notes') or meta.get('_problems') or []
+                items.append(info)
+            return self._json(dict(
+                items=items, disabled=sorted(layout_spec.disabled_names()),
+                dir=layout_store.directory(),
+                vision=bool(cfg_mod.vision_config()),
+                vision_note=cfg_mod.vision_warning(),
+                template_ok=os.path.isfile(cfg_mod.template_path()),
+                officecli=bool(visual_mod.find_officecli())))
+
+        if p.startswith('/api/layout-draft/'):
+            rid = p.rsplit('/', 1)[-1]
+            got = _load_draft(rid)
+            if got is None:
+                return self._json({'error': 'no such draft'}, 404)
+            # 草稿里的预览图可能是上一轮留下的，每次读都按当前文件重新判定
+            got['preview'] = _draft_preview_url(rid) if got.get('ok') else None
+            return self._json(got)
 
         if p.startswith('/api/deck/'):
             # 前端的卡片标签、「要不要提示会丢人工修改」、以及提案阶段的页码表都靠这一份。
@@ -1408,6 +1497,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         p = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
+
+        if p.startswith('/api/layouts/'):
+            # 只对**自定义**版式开放：内置版式的定义是 layouts.py 里的代码，
+            # 删不掉也不该删（layout_store.unregister 会拦下来）。
+            name = os.path.basename(p[len('/api/layouts/'):].replace('\\', '/'))
+            try:
+                removed = layout_store.remove_meta(name)
+            except ValueError as e:
+                return self._json({'error': str(e)}, 403)
+            if not removed:
+                return self._json({'error': '没有这套版式：%s' % name}, 404)
+            for leftover in (_preview_file(name),):
+                # 预览图跟着删：留着会变成「版式没了但图鉴里还有一张图」
+                if leftover and os.path.isfile(leftover):
+                    os.remove(leftover)
+            return self._json(dict(removed=True, name=name))
+
         if not p.startswith('/api/uploads/'):
             return self._json({'error': 'not found'}, 404)
 
@@ -1431,6 +1537,8 @@ class Handler(BaseHTTPRequestHandler):
         # 上传先于 JSON 解析 —— 它的 body 是原始二进制，不是 JSON
         if p == '/api/upload':
             return self._upload(u)
+        if p == '/api/layouts/recognize':
+            return self._upload_shot(u)
 
         try:
             body = self._body()
@@ -1518,7 +1626,214 @@ class Handler(BaseHTTPRequestHandler):
                                    body.get('rid') or ''), daemon=True).start()
             return self._json({'job_id': jid})
 
+        if p == '/api/layouts/state':
+            name = (body.get('name') or '').strip()
+            try:
+                layout_store.set_enabled(name, bool(body.get('enabled')))
+            except ValueError as e:
+                return self._json({'error': str(e)}, 400)
+            return self._json(dict(name=name, enabled=layout_spec.is_enabled(name)))
+
+        if p == '/api/layouts/adopt':
+            rid = (body.get('rid') or '').strip()
+            d = _load_draft(rid)
+            if not d or not d.get('meta'):
+                return self._json({'error': '识别草稿不存在或已过期，请重新识别'}, 404)
+            name = d['meta'].get('name') or ''
+            try:
+                layout_store.save_meta(d['meta'])
+            except ValueError as e:
+                return self._json({'error': str(e)}, 400)
+            # 试片图搬进版式自己的预览位，页面与图鉴从此有图可看
+            src = _safe_join(VISUAL, '_layouts/_draft-%s/trial/page-%02d.png' % (rid, PAGE))
+            dst = _preview_file(name)
+            if src and dst and os.path.isfile(src):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copyfile(src, dst)
+            _drop_draft(rid)
+            return self._json(dict(name=name, enabled=True,
+                                   preview=_preview_url(name)))
+
+        if p == '/api/layouts/discard':
+            rid = (body.get('rid') or '').strip()
+            _drop_draft(rid)                     # 试片目录留着无妨，预览图那条路会忽略它
+            return self._json(dict(discarded=True))
+
+        if p == '/api/layouts/previews':
+            jid = _job_new()
+            threading.Thread(target=run_layout_previews, args=(jid,),
+                             daemon=True).start()
+            return self._json({'job_id': jid})
+
         return self._json({'error': 'not found'}, 404)
+
+
+# ══════════════════════════════════════════════════════════════
+# 版式管理：识别截图 → 草稿 → 采用/放弃；预览图；启停与删除
+# ══════════════════════════════════════════════════════════════
+
+def _preview_file(name: str) -> str | None:
+    return _safe_join(LAYOUT_VISUAL, '%s/page-%02d.png' % (name, PAGE))
+
+
+def _preview_url(name: str) -> str | None:
+    """版式预览图的 URL（图还没渲出来就是 None —— 前端据此显示「生成预览图」）。"""
+    f = _preview_file(name)
+    if f and os.path.isfile(f):
+        return '/preview/_layouts/%s/page-%02d.png' % (name, PAGE)
+    return None
+
+
+def _draft_path(rid: str) -> str | None:
+    rid = re.sub(r'[^\w-]', '', rid or '')[:24]
+    if not rid:
+        return None
+    return _safe_join(PLANS, DRAFT_SUFFIX % rid)
+
+
+def _draft_work(rid: str) -> str:
+    return _safe_join(VISUAL, '_layouts/_draft-%s' % rid) or ''
+
+
+def _draft_preview_url(rid: str) -> str | None:
+    f = _safe_join(VISUAL, '_layouts/_draft-%s/trial/page-%02d.png' % (rid, PAGE))
+    if f and os.path.isfile(f):
+        return '/preview/_layouts/_draft-%s/trial/page-%02d.png' % (rid, PAGE)
+    return None
+
+
+def _save_draft(rid: str, payload: dict) -> None:
+    p = _draft_path(rid)
+    if not p:
+        return
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _load_draft(rid: str) -> dict | None:
+    p = _draft_path(rid)
+    if not p or not os.path.isfile(p):
+        return None
+    try:
+        with open(p, encoding='utf-8') as f:
+            got = json.load(f)
+        return got if isinstance(got, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _drop_draft(rid: str) -> None:
+    p = _draft_path(rid)
+    if p and os.path.isfile(p):
+        os.remove(p)
+
+
+def run_recognize_layout(jid: str, image_path: str, shot_name: str):
+    """识别一张版式截图 → 草稿。在后台线程里跑。
+
+    草稿**落盘**（`out/plans/layout-<rid>.json`），不只在内存 job 里 —— 识别要
+    十几秒、还可能重试两轮，用户刷新一下页面草稿就没了会很难受。这条补偿模式
+    与 `/api/revision/<rid>` 一致。
+    """
+    rid = uuid.uuid4().hex[:10]
+    work = _draft_work(rid)
+    try:
+        runlog = runlog_mod.RunLog('layout-%s' % rid, origin='web', command='layouts')
+        with JOBS_LOCK:
+            JOBS[jid]['runlog'] = runlog
+        runlog.put('config', runlog_mod.config_snapshot())
+        _log(jid, '本次流程日志：%s' % runlog.dir)
+        with runlog.stage('recognize') as st:
+            _log(jid, '识别版式截图（调用视觉模型，可能要十几秒）…', 'active')
+            draft = recognize_mod.recognize(image_path, work,
+                                            on_log=lambda m: _log(jid, m))
+            st.update(ok=draft['ok'], rounds=len(draft['attempts']))
+        meta = draft.get('meta') or {}
+        trial = draft.get('trial') or {}
+        _save_draft(rid, dict(
+            rid=rid, shot=shot_name, ok=draft['ok'], reason=draft['reason'],
+            meta=meta, verify=draft.get('verify'), attempts=draft['attempts'],
+            geometry=(trial.get('geometry') or {}).get('summary'),
+            truncations=[list(t) for t in (trial.get('truncations') or [])],
+            preview=_draft_preview_url(rid) if draft['ok'] else None,
+        ))
+        if draft['ok']:
+            _log(jid, '识别通过：%s' % meta.get('name'), 'success',
+                 detail='试片几何 %s' % ((trial.get('geometry') or {}).get('summary')))
+        else:
+            _log(jid, draft['reason'], 'warning')
+        _finish(jid, result=dict(rid=rid, ok=draft['ok'], name=meta.get('name'),
+                                 reason=draft['reason']))
+    except Exception as e:                      # noqa: BLE001 —— 与其它任务同样的收尾
+        traceback.print_exc()
+        _log(jid, '失败：%s' % e, 'warning')
+        _finish(jid, error='%s: %s' % (type(e).__name__, e))
+
+
+def _layout_sample(name: str) -> dict | None:
+    """取一套版式的样板 spec（内置的来自 samples，自定义的来自它自己的 sample）。
+
+    自定义版式的 spec 要**带上 blocks**：它的渲染函数是同一个声明式渲染器，
+    而区块在注册表里 —— 试片/预览这条路走 `spec['blocks']`，不必先注册。
+    """
+    sp = layout_spec.REGISTRY.get(name)
+    if sp is None:
+        return None
+    if sp.source == 'builtin':
+        return samples.for_layout(name)
+    for meta in layout_store.list_metas():
+        if meta.get('name') == name and isinstance(meta.get('sample'), dict):
+            sl = dict(meta['sample'])
+            sl['layout'] = name
+            sl['blocks'] = meta.get('blocks') or []
+            return sl
+    return None
+
+
+def run_layout_previews(jid: str):
+    """给还没有预览图的版式渲预览图（一次 build + 一次逐页渲）。
+
+    19 套内置版式 + 自定义版式一起渲，产物落到 `out/visual/_layouts/<名字>/`，
+    缓存住 —— 这是版式页「查看」那一半的数据来源。
+    """
+    try:
+        todo = [n for n in layout_spec.names() if not _preview_url(n)]
+        have = [n for n in todo if _layout_sample(n)]
+        _log(jid, '需要生成预览图的版式：%d 套（其余已有缓存）' % len(have))
+        if not have:
+            _finish(jid, result=dict(rendered=0))
+            return
+        work = os.path.join(LAYOUT_VISUAL, '_preview_build')
+        os.makedirs(work, exist_ok=True)
+        slides = [s for s in (_layout_sample(n) for n in have) if s]
+        names = [s['layout'] for s in slides]
+        pptx = os.path.join(work, 'layouts.pptx')
+        _log(jid, '先渲一版含全部样例的 deck…', 'active')
+        build_mod.build(dict(slides=slides, toc=[]), cfg_mod.template_path(), pptx)
+        # 逐页渲、逐页落位：officecli 一页要十几秒，19 页连着渲完再拷贝的话
+        # 用户要对着空页面干等几分钟、中间看不到任何进展（这条实测过）。
+        rendered = 0
+        for i, name in enumerate(names):
+            _log(jid, '预览图 %d/%d：%s' % (i + 1, len(names), name), 'active')
+            try:
+                got = visual_mod.render_pages(pptx, work, pages=[PAGE + i])
+            except RuntimeError as e:               # officecli 缺失：一次都渲不出来
+                _log(jid, '渲染器不可用：%s' % e, 'warning')
+                break
+            src, dst = got.get(PAGE + i), _preview_file(name)
+            if not src or not dst:
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(src, dst)
+            rendered += 1
+        _log(jid, '预览图完成：%d / %d' % (rendered, len(names)),
+             'success' if rendered else 'warning')
+        _finish(jid, result=dict(rendered=rendered, total=len(names)))
+    except Exception as e:                      # noqa: BLE001
+        traceback.print_exc()
+        _log(jid, '预览图生成失败：%s' % e, 'warning')
+        _finish(jid, error='%s: %s' % (type(e).__name__, e))
 
 
 def main():
@@ -1527,7 +1842,7 @@ def main():
     ap.add_argument('--host', default='127.0.0.1')
     a = ap.parse_args()
     cfg_mod.load_env()
-    for d in (SAMPLES, PLANS, REPORTS, VISUAL, UPLOADS, LOGS):
+    for d in (SAMPLES, PLANS, REPORTS, VISUAL, UPLOADS, LOGS, LAYOUT_VISUAL, SHOTS):
         os.makedirs(d, exist_ok=True)
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     print('文档转 PPT —— 前端已启动')

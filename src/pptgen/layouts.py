@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""19 套内容版式。每套是一个 `render(slide, spec)` 函数，spec 为 dict。
+"""内置的 19 套内容版式。每套是一个 `render(slide, spec)` 函数，spec 为 dict。
+
+**这里只有内置版式。** 用户从截图识别出来的自定义版式不走这条路 —— 它们是
+声明式的（`layouts_custom/*.json` + `layout_dsl.render_blocks`），在
+`layout_store.load_all()` 里注册进同一份 `LAYOUTS` / `REGISTRY`。
 
 版式**元数据与渲染函数写在一起**（`@layout(...)` 装饰器），登记进
 `layout_spec.REGISTRY`。喂给模型的版式目录与压文案的容量预算都由那份注册表
@@ -39,15 +43,14 @@ from pptx.oxml.ns import qn
 from . import layout_spec
 from .layout_spec import LayoutSpec
 from .tokens import (
-    LEFT, RIGHT, W, FS, RED, DARK, MUTED, GREY, RULE, TINT, WHITE,
+    LEFT, RIGHT, W, FS, RED, DARK, MUTED, GREY, RULE, TINT, Y_BOTTOM,
     EA, LAT, Y_CONTENT, Y_SOURCE,
-    put, hrule, vrule, dot, outline_box, tint_band,
+    put, hrule, vrule, dot, outline_box, tint_band, table, paras, runs,
     header, footer, fit_one_line, fit_block, text_w_in,
 )
 
-# 新版式的正文下界。留到 6.60 而不是 6.95：来源行在 6.78，内容压过它会被
-# 几何检查的 text_overlap 抓到（comparison_rows 早先就是这么撞上的）。
-Y_BOTTOM = 6.60
+# 正文下界 `Y_BOTTOM` 从 tokens 导入 —— 声明式版式（自定义版式）用同一个，
+# 常量留在两个文件里迟早会分叉。
 
 __all__ = ['LAYOUTS', 'render_slide', 'LAYOUT_NAMES']
 
@@ -89,85 +92,12 @@ def _fit(text, avail_in, pt, lines=1):
     return fit_one_line(str(text), avail_in, pt, lines=lines)
 
 
-def _runs(runs):
-    """把一段文字里的 run 转成 `[(text, opts), ...]`，并处理 hl 强调色。
+def _flat(lines) -> str:
+    """段落列表压成纯文本（用于按宽度截断的场合）。
 
-    **模型的富文本写法比契约自由得多**，实测三种都出现过：
-
-        [("文本", {"hl": true})]            标准写法
-        [["文本", {"hl": true}]]            用 list 而不是 tuple
-        [{"text": "文本", "hl": true}]      用 dict 描述一个 run
-
-    三种都要吃下来。渲染层崩在模型输出上，比渲染得难看糟得多 ——
-    `tokens._as_text` 早就为同样的理由做过了容错，这里补齐。
+    形参不叫 `paras` —— 那个名字是同名归一函数的，遮住它是个陷阱。
     """
-    if isinstance(runs, (str, dict)):
-        runs = [runs]
-    runs = list(runs)
-    # 形如 ["文本", {"hl": true}] 是**一个 run 被写成了 list**，不是「两个 run」。
-    # 判据：两元素、首个是字符串、次个是 dict 且自身不带 text。
-    if (len(runs) == 2 and isinstance(runs[0], str)
-            and (runs[1] is None or (isinstance(runs[1], dict)
-                                     and 'text' not in runs[1]))):
-        runs = [(runs[0], runs[1] or {})]
-    out = []
-    for r in runs:
-        if isinstance(r, str):
-            txt, o = r, {}
-        elif isinstance(r, dict):
-            # {"text": "...", "hl": true} —— 除 text 外的键都当 opts
-            o = {k: v for k, v in r.items() if k != 'text'}
-            txt = r.get('text', '')
-        elif isinstance(r, (list, tuple)):
-            txt = r[0] if len(r) else ''
-            o = dict(r[1]) if len(r) > 1 and isinstance(r[1], dict) else {}
-        else:
-            txt, o = str(r), {}
-        o = dict(o)
-        if o.pop('hl', False):
-            o['color'] = RED
-            o.setdefault('bold', True)
-        out.append((txt, o))
-    return out
-
-
-def _paras(lines):
-    """lines → 段落列表，每段是 run 列表。
-
-    层级判定（沿用契约里的约定：**tuple 是 run，list 是段落**）：
-
-        全是 tuple       → 这是**一段**的 run 列表（`aside: [(文本,{}), ...]` 就这么写）
-        全是字符串       → 每串各自一段（`body: ["第一段", "第二段"]`）
-        全是 dict        → 一段、多个 run（`[{"text":…},{"text":…}]`）
-        其余（子列表）   → 每个子列表是一段（`[["文本",{"hl":true}]]` 即一段一 run）
-
-    ⚠️ 早先只认「`lines[0]` 是不是 tuple」，于是模型用 **list** 写单段时整段崩掉 ——
-    实测 `aside: [["GitHub 60,000+ Star", {"hl": true}]]` 抛
-    `ValueError: too many values to unpack`。现在那个形态由 `_runs` 的
-    「一个 run 写成了 list」判据接住。
-    """
-    if isinstance(lines, str):
-        return [[(lines, {})]]
-    if isinstance(lines, dict):
-        return [_runs([lines])]
-    if not isinstance(lines, (list, tuple)):
-        return [[(str(lines), {})]]
-    items = list(lines)
-    if not items:
-        return []
-    if all(isinstance(x, tuple) for x in items):
-        return [_runs(items)]
-    if all(isinstance(x, str) for x in items):
-        return [[(x, {})] for x in items]
-    if all(isinstance(x, dict) for x in items):
-        return [_runs(items)]
-    return [_runs(x) if isinstance(x, (list, tuple)) else [(str(x), {})]
-            for x in items]
-
-
-def _flat(paras) -> str:
-    """段落列表压成纯文本（用于按宽度截断的场合）。"""
-    return ''.join(t for p in _paras(paras) for t, _ in p)
+    return ''.join(t for p in paras(lines) for t, _ in p)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -238,7 +168,7 @@ def render_section_divider(s, spec):
 def render_statement(s, spec):
     """大字陈述。没有标题——陈述本身就是标题。"""
     header(s, spec.get('kicker'))
-    lines = _paras(spec['lines'])
+    lines = paras(spec['lines'])
     for p in lines:
         for t, o in p:
             o['size'] = spec.get('size', 36)
@@ -247,7 +177,7 @@ def render_statement(s, spec):
     put(s, LEFT, spec.get('y', 2.40), 11.0, 2.4, lines, ls=1.34)
     y = spec.get('body_y', 5.05)
     if spec.get('body'):
-        put(s, LEFT, y, 10.6, 1.7, _paras(spec['body']), ls=1.45)
+        put(s, LEFT, y, 10.6, 1.7, paras(spec['body']), ls=1.45)
     footer(s, spec['page'], spec.get('source'))
 
 
@@ -288,7 +218,7 @@ def render_stat_hero(s, spec):
         [[(num, dict(size=72, color=RED, bold=True)),
           (unit, dict(size=22, color=MUTED))]])
     if spec.get('claim'):
-        put(s, 4.85, 2.42, W - 4.18, 1.5, _paras(spec['claim']), ls=1.42)
+        put(s, 4.85, 2.42, W - 4.18, 1.5, paras(spec['claim']), ls=1.42)
     hrule(s, LEFT, 4.62, W)
     stats = spec.get('stats') or []
     if stats:
@@ -398,7 +328,7 @@ def render_definition(s, spec):
     if body:
         put(s, LEFT, 4.62, 11.0, 1.55, body, ls=1.45)
     if spec.get('aside'):
-        put(s, LEFT, 6.28, 11.0, 0.35, _paras(spec['aside']))
+        put(s, LEFT, 6.28, 11.0, 0.35, paras(spec['aside']))
     footer(s, spec['page'], spec.get('source'))
 
 
@@ -618,46 +548,18 @@ def render_split_main_aside(s, spec):
             [[(_fit(spec['aside_title'], aw, 14),
                dict(size=14, color=DARK, bold=True))]])
     top = 2.58 if spec.get('aside_title') else 2.20
-    table = spec.get('aside_table')
+    # 局部变量名不能叫 `table` —— 那会遮住 tokens 里同名的表格原语，
+    # 本函数后半段正是要调它。
+    aside_tbl = spec.get('aside_table')
     stats = (spec.get('aside_stats') or [])[:4]
     points = (spec.get('aside_points') or [])[:4]
-    if table and table.get('header') and table.get('rows'):
-        rows = table['rows'][:4]
-        data = [table['header']] + rows
-        nr, nc = len(data), len(table['header'])
-        hgt = min(Y_BOTTOM - top, 0.46 * nr)
-        gf = s.shapes.add_table(nr, nc, Inches(ax), Inches(top),
-                                Inches(aw), Inches(hgt))
-        tb = gf.table
-        tb.first_row = False
-        tb.horz_banding = False
-        for c in range(nc):
-            tb.columns[c].width = Inches(aw / nc)
-        tb.rows[0].height = Inches(0.42)
-        for r in range(1, nr):
-            tb.rows[r].height = Inches(max(0.30, (hgt - 0.42) / max(nr - 1, 1)))
-        for r in range(nr):
-            for c in range(nc):
-                cell = tb.cell(r, c)
-                cell.margin_left = cell.margin_right = Inches(0.08)
-                cell.margin_top = cell.margin_bottom = Inches(0.03)
-                cell.vertical_anchor = MSO_ANCHOR.MIDDLE
-                cell.fill.solid()
-                cell.fill.fore_color.rgb = DARK if r == 0 else WHITE
-                tf = cell.text_frame
-                tf.word_wrap = True
-                p = tf.paragraphs[0]
-                p.alignment = PP_ALIGN.LEFT
-                run = p.add_run()
-                run.text = str(data[r][c])
-                run.font.size = Pt(12)
-                run.font.bold = (r == 0) or (c == 0)
-                run.font.color.rgb = WHITE if r == 0 else DARK
-                run.font.name = LAT
-                rPr = run._r.get_or_add_rPr()
-                el = rPr.makeelement(qn('a:ea'), {})
-                el.set('typeface', EA)
-                rPr.append(el)
+    if aside_tbl and aside_tbl.get('header') and aside_tbl.get('rows'):
+        data = [aside_tbl['header']] + aside_tbl['rows'][:4]
+        # 辅区表紧凑一档：字小一号、边距收一半、表头行更矮，行高下限 0.30"
+        # 撑住最小值（辅区宽度只有 4" 上下，行再矮就压字了）。
+        table(s, ax, top, aw, min(Y_BOTTOM - top, 0.46 * len(data)), data,
+              font=12, header_font=12, header_h=0.42, min_row_h=0.30,
+              margin=(0.08, 0.03))
     elif stats:
         rh2 = min(1.00, (Y_BOTTOM - top) / len(stats))
         for i, st in enumerate(stats):
@@ -721,7 +623,7 @@ def render_process_chain(s, spec):
         # note 常被写成多段。0.45" 的框只够一行，所以把规则线与 note 上移、
         # 给出 0.78"（≈56pt）的高度容纳两行，再按两行宽度截断。
         hrule(s, LEFT, 5.80, W)
-        flat = ''.join(t for p in _paras([spec['note']]) for t, _ in p)
+        flat = ''.join(t for p in paras([spec['note']]) for t, _ in p)
         put(s, LEFT, 5.95, W, 0.78,
             [[(_fit(flat, W, 15, lines=2), dict(size=15, color=MUTED))]], ls=1.42)
     footer(s, spec['page'], spec.get('source'))
@@ -974,50 +876,12 @@ def render_layered_stack(s, spec):
 def render_data_table(s, spec):
     """原生 PowerPoint 表格。"""
     header(s, spec.get('kicker'), spec.get('title'))
-    header_row = spec['header']
-    data = [header_row] + spec['rows']
-    nr, nc = len(data), len(header_row)
-    y = spec.get('y', 2.20)
-    hgt = spec.get('h', 3.9)
-    gf = s.shapes.add_table(nr, nc, Inches(LEFT), Inches(y), Inches(W), Inches(hgt))
-    tb = gf.table
-    tb.first_row = False
-    tb.horz_banding = False
-    widths = spec.get('col_widths') or [W / nc] * nc
-    for i, wd in enumerate(widths):
-        tb.columns[i].width = Inches(wd)
-    tb.rows[0].height = Inches(spec.get('header_h', 0.52))
-    body_h = (hgt - spec.get('header_h', 0.52)) / (nr - 1)
-    for r in range(1, nr):
-        tb.rows[r].height = Inches(spec.get('row_h', body_h))
-    for r in range(nr):
-        for c in range(nc):
-            cell = tb.cell(r, c)
-            cell.margin_left = cell.margin_right = Inches(0.12)
-            cell.margin_top = cell.margin_bottom = Inches(0.06)
-            cell.vertical_anchor = MSO_ANCHOR.MIDDLE
-            cell.fill.solid()
-            # 表头用近黑 DARK 而不是 accent4 蓝：模板自身的页面从不用蓝（theme1 里
-            # accent4 只出现在一个空段落的 endParaRPr 上，是残留不是设计），
-            # 整条深色带比深藏青更贴「红顶栏 + 深色正文」这套语言，也不跟红顶栏抢。
-            cell.fill.fore_color.rgb = DARK if r == 0 else WHITE
-            tf = cell.text_frame
-            tf.word_wrap = True
-            p = tf.paragraphs[0]
-            p.alignment = PP_ALIGN.LEFT
-            run = p.add_run()
-            run.text = data[r][c]
-            run.font.size = Pt(spec.get('font', 13.5) if r else spec.get('font', 13.5) - 0.5)
-            # 首列与正文同为 DARK —— 层级只靠加粗区分。原来首列是蓝色，
-            # 等于在正文区又开了一个色相；现在整页只有表头那一条深色带和
-            # 页眉那一抹红，色相收敛到两个。
-            run.font.bold = (r == 0) or (c == 0)
-            run.font.color.rgb = WHITE if r == 0 else DARK
-            run.font.name = LAT
-            rPr = run._r.get_or_add_rPr()
-            el = rPr.makeelement(qn('a:ea'), {})
-            el.set('typeface', EA)
-            rPr.append(el)
+    table(s, LEFT, spec.get('y', 2.20), W, spec.get('h', 3.9),
+          [spec['header']] + spec['rows'],
+          col_widths=spec.get('col_widths'),
+          font=spec.get('font', 13.5),
+          header_h=spec.get('header_h', 0.52),
+          row_h=spec.get('row_h'))
     footer(s, spec['page'], spec.get('source'))
 
 
@@ -1102,7 +966,7 @@ def render_metric_trend(s, spec):
             put(s, tx, yy, 0.26, 0.30,
                 [[('—', dict(size=14, color=RED, bold=True))]])
             put(s, tx + 0.28, yy, tw - 0.28, 1.25,
-                _paras([para]), ls=1.38)
+                paras([para]), ls=1.38)
     footer(s, spec['page'], spec.get('source'))
 
 
@@ -1237,13 +1101,13 @@ def render_quote(s, spec):
     """引语页：一页只讲一句话。"""
     header(s, spec.get('kicker'))
     put(s, LEFT, spec.get('y', 2.55), 11.0, 1.6,
-        _paras(spec['quote']), ls=1.32)
+        paras(spec['quote']), ls=1.32)
     if spec.get('attribution'):
         put(s, LEFT, 4.20, 11.0, 0.4,
             [[(spec['attribution'], dict(size=14, color=MUTED))]])
     hrule(s, LEFT, 4.92, W)
     if spec.get('body'):
-        put(s, LEFT, 5.20, 11.0, 1.5, _paras(spec['body']), ls=1.45)
+        put(s, LEFT, 5.20, 11.0, 1.5, paras(spec['body']), ls=1.45)
     footer(s, spec['page'], spec.get('source'))
 
 
@@ -1253,6 +1117,13 @@ LAYOUT_NAMES = list(LAYOUTS)
 
 def render_slide(slide, spec):
     name = spec['layout']
-    if name not in LAYOUTS:
+    fn = LAYOUTS.get(name)
+    if fn is None:
+        # 声明式版式的**试片**：识别出来的版式还没入库（也不该入库 —— 半成品进了
+        # 注册表就可能被并发的生成选中），所以它的区块随 spec 一起来。
+        # 这类 spec 自带 `blocks`，直接交给声明式渲染器。
+        if spec.get('blocks'):
+            from . import layout_dsl          # 局部 import：内置 19 套不该依赖声明式那条路
+            return layout_dsl.render_blocks(slide, spec)
         raise KeyError('unknown layout %r; known: %s' % (name, LAYOUT_NAMES))
-    LAYOUTS[name](slide, spec)
+    fn(slide, spec)

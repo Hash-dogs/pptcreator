@@ -99,34 +99,54 @@ def llm_config() -> LLMConfig | None:
     return None
 
 
-# 已知看不了图的模型名特征。配置里填了这些就直接判定「没有视觉能力」，
-# 免得调用时返回一堆无法解析的文字、看起来像「看图通过」。
+# 已知看不了图的模型名特征。
+#
+# ⚠️ **这张名单只用来提醒，不用来否决配置。** 原先它是一道硬拦截：模型名命中就
+# 直接返回 None，等于用一个「写代码时的假设」去否决用户**显式写下**的配置。
+# 实测踩过：`.env` 里 `PPTGEN_VISION_MODEL` 配得好好的，`run.py config` 却报
+# 「视觉模型：未配置」，看起来像用户没配 —— 而名单里那个名字（`deepseek-flash`）
+# 在用户的部署里就是能看图的。
+#
+# 保留它是为了**防静默**：把图发给看不见图的模型，它往往照样返回一段像样的文字，
+# 看起来像「看图通过」。所以命中名单时给一句可听见的提醒（`vision_warning()`），
+# 由 `run.py config`、网页的配置状态、版式管理页三处显示出来。
 _NO_VISION = ('deepseek-chat', 'deepseek-flash', 'deepseek-reasoner',
               'deepseek-coder', 'gpt-3.5', 'text-davinci', 'o1-mini')
 
 
 def vision_capable(model: str | None) -> bool:
+    """模型名在「已知看不见图」名单里 → False。**只用于提醒**，不用于否决。"""
     if not model:
         return False
     m = model.lower()
     return not any(m.startswith(p) for p in _NO_VISION)
 
 
+def vision_warning(model: str | None = None) -> str:
+    """视觉模型名可疑时返回一句人话提醒，否则空串。"""
+    m = model or get('PPTGEN_VISION_MODEL') or ''
+    if m and not vision_capable(m):
+        return ('「%s」在已知的看不见图的模型名单里。如果识别或看图的结果是空的、'
+                '或明显跑题，多半是它读不到图 —— 换一个支持图片输入的模型'
+                '（填法见 .env.example 第 2 节）。' % m)
+    return ''
+
+
 def vision_config() -> LLMConfig | None:
     base = get('PPTGEN_VISION_BASE_URL')
     key = get('PPTGEN_VISION_API_KEY')
     model = get('PPTGEN_VISION_MODEL')
-    if model and not vision_capable(model):
-        return None
-    if base and key and model:
+    # 用户**显式写了**视觉模型名，那就是他的断言 —— 不再拿名单否决它。
+    if model and base and key:
         return LLMConfig(base, key, model, get('PPTGEN_VISION_API_VERSION'))
-    # 回退：**仅在给了视觉模型名、但没给 base/key 时**复用文本模型的连接信息
-    #（同家服务商常共用 key）。若连模型名都没有，就没有视觉能力可用 ——
-    # 早先这里会直接返回文本模型配置，导致把看不见图的模型当视觉模型调用。
+    # 回退：给了视觉模型名、但没给 base/key 时复用文本模型的连接信息
+    #（同家服务商常共用 key）。
     if model and get_bool('PPTGEN_VISION_FALLBACK_TO_LLM', True):
         fb = llm_config()
         if fb is not None:
             return LLMConfig(fb.base, fb.key, model, fb.api_version)
+    # 连模型名都没有 → 没有视觉能力可用。**这才是名单最初要拦的那个 bug**：
+    # 早先这里直接返回文本模型配置，于是把看不见图的模型当视觉模型调用了。
     return None
 
 
@@ -293,19 +313,40 @@ def template_path() -> str:
     return t if os.path.isabs(t) else os.path.join(ROOT, t)
 
 
+def layouts_dir() -> str:
+    """自定义版式的目录（默认仓库根下的 `layouts_custom/`，**随仓库提交**）。
+
+    与 `out/` 下的产物不同，自定义版式是**资产**不是产物：识别一次要花一次模型
+    调用，同事之间也该共用同一套。所以默认落在仓库里、进版本控制。
+
+    `PPTGEN_LAYOUTS_DIR` 可以指到别处（绝对路径，或相对仓库根）——
+    单测靠它把注册表隔离到临时目录，不然跑一遍测试就会污染真实的版式库。
+    """
+    d = get('PPTGEN_LAYOUTS_DIR', 'layouts_custom') or 'layouts_custom'
+    return d if os.path.isabs(d) else os.path.join(ROOT, d)
+
+
 def summary() -> str:
     llm, vis = llm_config(), vision_config()
     lo, hi = page_range()
     pw, ph = preview_size()
-    return '\n'.join([
+    warn = vision_warning()
+    lines = [
         '配置状态',
         '  文本模型 : %s' % (llm or '未配置（大纲/规划将走确定性模式）'),
         '  视觉模型 : %s' % (vis or '未配置（看图输出人工复核包）'),
+    ]
+    if warn:
+        # 名单命中的提醒放在模型名下面一行 —— 它只提醒，不否决（见 _NO_VISION 注释）
+        lines.append('             ⚠ %s' % warn)
+    lines += [
         '  页数区间 : %d–%d（正文；章节分隔页另计）' % (lo, hi),
         '  预览分辨率: %d×%d（仅 Web 逐页预览）' % (pw, ph),
         '  章节分隔 : %s' % ('插入' if section_dividers() else '不插（PPTGEN_SECTION_DIVIDERS=0）'),
         '  内容策略 : %s' % content_mode(),
         '  模板     : %s' % template_path(),
+        '  版式目录 : %s（自定义版式，进版本控制）' % layouts_dir(),
         '  输出目录 : %s' % out_dir(),
         '  文件日志 : %s' % (log_root() if log_enabled() else '已关闭（PPTGEN_LOG=0）'),
-    ])
+    ]
+    return '\n'.join(lines)

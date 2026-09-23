@@ -728,7 +728,7 @@ HARD_ISSUES = ('text_overflow', 'text_overlap', 'past_safe_area')
 def check_by_build(deck: dict, build_qa, pages: set[int]) -> dict[int, list[str]]:
     """**真正的容量门**：构建一份 + 几何检查，只看关心的那几页。
 
-    为什么不靠 `pipeline.overflow_reason`：实测 19 套版式里只有 3 套声明了
+    为什么不靠 `pipeline.overflow_reason`：实测内置 19 套里只有 3 套声明了
     `max_item_chars`（单条字数的硬上限），而 `section_divider` / `statement` /
     `definition` / `metric_trend` / `quote` 在 `_ITEM_FIELDS` 里**根本没有规则**
     —— 它挡不住大多数溢出。

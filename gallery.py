@@ -7,12 +7,16 @@
 产物（都在 `out/gallery/`，整个目录可以原样发布）：
 
     layouts.pptx        样板 deck（封面 + 目录 + 样例正文 + 封底）。样例条数由
-                        FIXTURES 决定，现为 21 条 / 19 套版式 ——
+                        FIXTURES 决定，现为 21 条 / 内置 19 套版式 ——
                         split_main_aside 与 timeline_vertical 各有两条样例
     pages/page-NN.png   逐页渲染图
     index.html          图鉴页，图片走相对路径
 
-**样例不是另写的一套演示内容。** 取自 `tests/test_layouts.py` 的 `FIXTURES` ——
+**这份图鉴只收内置版式。** 自定义版式（`layouts_custom/*.json`）不进这里：
+它们是**本机的版式库资产**，而这份 HTML 是「可以原样发到公网」的东西。
+自定义版式的预览图在 Web 的「版式管理」页（`/layouts`）。
+
+**样例不是另写的一套演示内容。** 取自 `pptgen/samples.py` 的 `FIXTURES` ——
 那是唯一一份按容量声明逐套写好的样例，`TestRenderAll` 每次回归都拿它跑几何检查。
 所以图鉴里的每一页都**已经过了几何自检**：框没给小、字没被 `_fit()` 静默截断，
 否则回归测试先红。图鉴跟着回归走，不会与版式漂移。
@@ -31,11 +35,10 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'src'))
-sys.path.insert(0, os.path.join(HERE, 'tests'))
 
 from pptgen import build, config, layout_spec          # noqa: E402
 from pptgen.qa import visual                           # noqa: E402
-from test_layouts import FIXTURES                      # noqa: E402
+from pptgen.samples import FIXTURES                    # noqa: E402
 
 # 封面/目录各占一页，正文从第 3 页起（build 里 `sl['page'] = i + 3`）
 FIRST_CONTENT_PAGE = 3
@@ -485,7 +488,7 @@ def write_html(out_dir: str, images: dict[int, str]) -> str:
     <p class="eyebrow mono">迈胜模板 · pptgen</p>
     <h1>内容版式图鉴</h1>
     <p class="lede">%d 套内容版式，每套一页真实样例。样例取自版式回归网
-      <span class="mono">tests/test_layouts.py</span> 的
+      <span class="mono">src/pptgen/samples.py</span> 的
       <span class="mono">FIXTURES</span> —— 与几何自检同一批 spec，
       所以每一页都保证框没给小、字没被静默截断。序号即
       <span class="mono">layout_spec.REGISTRY</span> 中的位置。</p>

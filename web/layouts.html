@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>版式管理 · 文档转 PPT</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23D31245'/%3E%3Ctext x='16' y='23' font-family='Segoe UI,sans-serif' font-size='19' font-weight='700' fill='%23fff' text-anchor='middle'%3EM%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- ── 左侧栏：与主页同一套结构，只把「新建」换成返回 ───────── -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">M</div>
+      <div>
+        <h1>版式管理</h1>
+        <p>迈胜模板 · 版式图鉴与自定义</p>
+      </div>
+    </div>
+
+    <a class="primary full btn-link" href="/">← 回到生成页</a>
+
+    <div id="statusBar" class="status sidebar-status">读取版式清单…</div>
+
+    <section id="progressPanel" class="progress-panel sidebar-progress hidden">
+      <div class="progress-head">
+        <strong>进行中</strong>
+        <span>实时刷新</span>
+      </div>
+      <div id="progressList" class="progress-list"></div>
+    </section>
+
+    <div id="cfg" class="sidebar-foot">读取配置…</div>
+  </aside>
+
+  <!-- ── 主区 ──────────────────────────────────────────────── -->
+  <main class="main">
+    <div class="page-head">
+      <div>
+        <h2>版式库</h2>
+        <p>内置版式与自定义版式在同一个库里。被禁用的版式不再被选中，但已有 PPT 仍能渲染、仍能按页修改。</p>
+      </div>
+    </div>
+
+    <!-- 添加：上传一张版式截图，AI 识别成可复用的版式 -->
+    <section class="panel" id="addPanel">
+      <div class="panel-title">
+        <h3>从截图添加版式</h3>
+        <span id="visionHint" class="meta"></span>
+      </div>
+      <p class="hint">
+        上传一张 PPT 版式的<strong>截图</strong>。程序会识别出版面的区块结构与分类，
+        自己渲一版<strong>试片</strong>给你看 —— 你只需要决定<strong>采用</strong>还是<strong>放弃</strong>。
+      </p>
+      <!-- 不加 `.source-line`：那是「单选标签 + 上传框」的两列网格，这一页没有
+           标签，套上去会把上传框挤进窄的第一列（实测就是一条竖条）。 -->
+      <div class="shot-row">
+        <div class="upload-area" id="dropZone">
+          <input id="shotFile" type="file" accept="image/*" hidden>
+          <div class="drop-hint">
+            把截图拖到这里，或
+            <button type="button" id="browseBtn" class="link">选择图片</button>
+            <span class="muted">PNG / JPG / WebP</span>
+          </div>
+          <div id="shotName" class="file-list"></div>
+        </div>
+      </div>
+
+      <!-- 识别结果：原图 vs 试片，并排看 -->
+      <div id="draftPanel" class="draft-panel hidden">
+        <div class="draft-head">
+          <h4 id="draftName">识别结果</h4>
+          <span id="draftBadge" class="badge"></span>
+        </div>
+        <div class="draft-pair">
+          <figure>
+            <img id="draftShot" alt="原图">
+            <figcaption>你上传的截图</figcaption>
+          </figure>
+          <figure>
+            <img id="draftTrial" alt="试片">
+            <figcaption>程序渲染的试片</figcaption>
+          </figure>
+        </div>
+        <div id="draftMeta" class="draft-meta"></div>
+        <div id="draftWarn" class="outline-warn" hidden></div>
+        <div class="panel-actions">
+          <button type="button" id="btnDiscard" class="secondary">放弃</button>
+          <button type="button" id="btnAdopt" class="primary">采用这个版式</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 查看：图鉴 -->
+    <section class="panel" id="listPanel">
+      <div class="panel-title">
+        <h3>全部版式</h3>
+        <span id="countMeta" class="meta"></span>
+      </div>
+      <div class="source-line action-line">
+        <div class="action-settings">
+          <label class="detail-control">筛选
+            <select id="filter">
+              <option value="all">全部</option>
+              <option value="builtin">内置</option>
+              <option value="custom">自定义</option>
+              <option value="off">已禁用</option>
+            </select>
+          </label>
+        </div>
+        <button type="button" id="btnPreviews" class="secondary">生成缺失的预览图</button>
+      </div>
+      <div id="grid" class="preview-grid"></div>
+    </section>
+  </main>
+</div>
+
+<!-- 预览弹层：与主页同一套（结构与样式都复用） -->
+<div id="lightbox" class="lightbox hidden">
+  <img id="lbImg" alt="">
+  <div class="lb-bar">
+    <span id="lbPage" class="lb-page"></span>
+  </div>
+  <button type="button" id="lbClose" class="lb-close" title="关闭（Esc）">✕</button>
+</div>
+
+<script src="/static/layouts.js"></script>
+</body>
+</html>
