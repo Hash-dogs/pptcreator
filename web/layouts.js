@@ -58,12 +58,12 @@ async function loadLayouts() {
     + custom + ' 套 · 已禁用 ' + (j.disabled || []).length + ' 套';
   $('cfg').innerHTML = '版式目录<br><span class="muted">' + esc(j.dir) + '</span><br>'
     + (j.vision ? '视觉模型：已配置' : '<span class="warn">视觉模型：未配置，无法识别截图</span>');
-  // 模型名可疑时把提醒显示出来（服务端给的话）—— 名单只提醒，不拦配置，
-  // 所以这里不能让入口消失，只能把话说清楚。
-  $('visionHint').innerHTML = j.vision
-    ? (j.vision_note
-        ? '<span class="warn">' + esc(j.vision_note) + '</span>'
-        : '视觉模型已配置')
+  // 只看「能不能识别」这一件事。模型名可疑的提醒（PPTGEN_VISION_MODEL 命中
+  // 已知看不见图的名单）不在这里显示 —— 用户的部署里那个模型能看图（实测两张
+  // 真实截图都识别通过），一条每次都出现的假警报只会变成噪声。那句提醒留在
+  // `run.py config` 的诊断输出里，需要排查时才看。
+  $('visionHint').textContent = j.vision
+    ? '视觉模型已配置'
     : '未配置视觉模型（PPTGEN_VISION_*），这个入口用不了';
   $('btnPreviews').disabled = !j.officecli;
   renderGrid();

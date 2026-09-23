@@ -1384,8 +1384,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(dict(
                 llm=(llm.model if llm else None),
                 vision=(vis.model if vis else None),
-                # 视觉模型名可疑时的一句提醒（名单只提醒、不否决配置）
-                vision_note=cfg_mod.vision_warning(),
                 pages=[lo, hi], mode=cfg_mod.content_mode(),
                 template=os.path.basename(cfg_mod.template_path()),
                 officecli=_officecli_ok(),
@@ -1434,7 +1432,6 @@ class Handler(BaseHTTPRequestHandler):
                 items=items, disabled=sorted(layout_spec.disabled_names()),
                 dir=layout_store.directory(),
                 vision=bool(cfg_mod.vision_config()),
-                vision_note=cfg_mod.vision_warning(),
                 template_ok=os.path.isfile(cfg_mod.template_path()),
                 officecli=bool(visual_mod.find_officecli())))
 
