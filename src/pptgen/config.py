@@ -229,6 +229,20 @@ def outline_segment() -> bool:
     return get_bool('PPTGEN_OUTLINE_SEGMENT', True)
 
 
+def repair_rounds() -> int:
+    """修复回环的最大轮数（`PPTGEN_REPAIR_ROUNDS`，默认 3）。
+
+    「最大」而不是「固定跑几轮」：某一轮几何检查已经干净就提前停（见
+    `repair.repair_deck` 的 `for ... else`），所以这个值只决定**最坏情况**下多花
+    几次模型调用。给 0 就是不修。
+
+    它是**部署口径**，不再是网页上的输入项：原来那个「修复轮数」输入框默认 3，
+    但没人知道 3 是怎么来的，改与不改都看不出区别 —— 放到 `.env` 里一次定好，
+    `run.py --rounds` 仍可对单次命令覆盖。
+    """
+    return max(0, get_int('PPTGEN_REPAIR_ROUNDS', 3))
+
+
 CONTENT_MODES = ('strict', 'balance', 'enrich')
 
 # 「内容策略」允许在**一次流程内**被临时覆盖 —— Web 前端让人现选一次
@@ -344,6 +358,8 @@ def summary() -> str:
         '  预览分辨率: %d×%d（仅 Web 逐页预览）' % (pw, ph),
         '  章节分隔 : %s' % ('插入' if section_dividers() else '不插（PPTGEN_SECTION_DIVIDERS=0）'),
         '  内容策略 : %s' % content_mode(),
+        # 界面上没有这一项了，`run.py config` 是唯一能看见生效值的地方
+        '  修复轮数 : %d（几何修复回环的上限；PPTGEN_REPAIR_ROUNDS）' % repair_rounds(),
         '  模板     : %s' % template_path(),
         '  版式目录 : %s（自定义版式，进版本控制）' % layouts_dir(),
         '  输出目录 : %s' % out_dir(),

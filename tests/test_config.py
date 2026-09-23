@@ -153,5 +153,43 @@ class ContentMode(unittest.TestCase):
         self.assertEqual(seen['mode'], 'balance')
 
 
+class RepairRounds(unittest.TestCase):
+    """修复轮数（`PPTGEN_REPAIR_ROUNDS`）的取值口径。
+
+    这一条从「网页上的输入框」搬进 `.env` 之后，**唯一的出口就是这个函数** ——
+    界面不再传、`server` 也不再读请求体，所以它一旦悄悄变了个值，没有任何地方
+    会报错：给大了只是多烧几次模型调用，给成 0 则是整个修复回环一页都不修，
+    产物看上去「生成成功」，只是几何告警还在。两种都要钉住。
+    """
+
+    def setUp(self):
+        pat = mock.patch.dict(os.environ, {'PPTGEN_REPAIR_ROUNDS': '3'})
+        pat.start()
+        self.addCleanup(pat.stop)
+
+    def test_missing_env_falls_back_to_three(self):
+        env = {k: v for k, v in os.environ.items() if k != 'PPTGEN_REPAIR_ROUNDS'}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(config.repair_rounds(), 3)
+
+    def test_explicit_value_wins(self):
+        os.environ['PPTGEN_REPAIR_ROUNDS'] = '5'
+        self.assertEqual(config.repair_rounds(), 5)
+
+    def test_zero_means_no_repair_and_is_not_treated_as_unset(self):
+        """0 是「不修」的正当取值 —— 别被 `or` 顶回默认值。"""
+        os.environ['PPTGEN_REPAIR_ROUNDS'] = '0'
+        self.assertEqual(config.repair_rounds(), 0)
+
+    def test_negative_is_clamped_to_zero(self):
+        os.environ['PPTGEN_REPAIR_ROUNDS'] = '-2'
+        self.assertEqual(config.repair_rounds(), 0)
+
+    def test_garbage_falls_back_to_three(self):
+        for bad in ('', '  ', 'three', '3轮', '2.5'):
+            os.environ['PPTGEN_REPAIR_ROUNDS'] = bad
+            self.assertEqual(config.repair_rounds(), 3, bad)
+
+
 if __name__ == '__main__':
     unittest.main()

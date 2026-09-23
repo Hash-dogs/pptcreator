@@ -1584,7 +1584,10 @@ class Handler(BaseHTTPRequestHandler):
             outline = body.get('outline')
             parsed_path = body.get('parsed_path') or ''
             name = re.sub(r'[^\w一-龥.-]', '_', body.get('name') or 'deck')
-            rounds = int(body.get('rounds') or 3)
+            # 轮数只认 `.env`（`PPTGEN_REPAIR_ROUNDS`）：它决定最坏情况下多花几次
+            # 模型调用，是部署口径而不是每次生成现选的选项 —— 请求体里哪怕带了
+            # `rounds` 也一律忽略，免得界面改回一个输入框就把成本又交回给使用者。
+            rounds = cfg_mod.repair_rounds()
             if not isinstance(outline, dict):
                 return self._json({'error': '缺少 outline'}, 400)
             safe = _safe_join(PLANS, os.path.basename(parsed_path.replace('\\', '/')))

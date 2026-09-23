@@ -77,17 +77,17 @@
             <label class="detail-control">输出文件名
               <input id="deckName" type="text" value="mydeck">
             </label>
-            <label class="detail-control">修复轮数
-              <input id="rounds" type="number" value="3" min="0" max="6">
-            </label>
+            <!-- 修复轮数不在这里：它由 `.env` 的 PPTGEN_REPAIR_ROUNDS 定死
+                 （`config.repair_rounds()`），一次流程该修几轮属于部署口径。 -->
             <!-- 默认值由 /api/config 回填（`.env` 的 PPTGEN_CONTENT_MODE）。
-                 选项文案与 README 那张表、`pipeline._mode_hint()` 三处一一对应。 -->
+                 `value` 是内部口径名（`config.CONTENT_MODES`），文案是给人看的
+                 说法 —— 与 README / `docs/程序运行文档.md` 那张表一一对应。 -->
             <label class="detail-control">内容策略
               <select id="contentMode"
-                title="模型对原文的取舍口径：只整理结构 / 可合并提炼 / 可补写过渡。改动从下一次「生成大纲」开始生效（已生成的大纲不会被改写）。">
-                <option value="strict">只做结构整理</option>
-                <option value="balance">合并提炼</option>
-                <option value="enrich">可补写过渡</option>
+                title="模型对原文的取舍口径：严格参照文档 / 适当扩展内容 / 大量拓展内容。改动从下一次「生成大纲」开始生效（已生成的大纲不会被改写）。">
+                <option value="strict">严格参照文档</option>
+                <option value="balance">适当扩展内容</option>
+                <option value="enrich">大量拓展内容</option>
               </select>
             </label>
           </div>

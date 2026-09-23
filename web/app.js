@@ -475,7 +475,8 @@ $('btnGenerate').onclick = async () => {
       outline: outline,
       parsed_path: state.parsedPath,
       name: $('deckName').value || 'deck',
-      rounds: +$('rounds').value || 0,
+      // 修复轮数不在请求里：它由 `.env` 的 PPTGEN_REPAIR_ROUNDS 定死，
+      // 服务端忽略请求体里的 `rounds`（见 `server._api_generate`）。
       // 规划阶段不读这个口径（只有大纲提示词读），带上它是为了让流程日志记的
       // 配置与实际选的一致 —— 单独一次 /api/generate 接不上大纲那次的日志文件夹时，
       // `runlog.config_snapshot()` 会现取一次。
@@ -933,7 +934,6 @@ $('newBtn').onclick = async () => {
   state.rootSrc = '';
   state.pollToken += 1;
   $('deckName').value = 'mydeck';
-  $('rounds').value = 3;
   clearJob();
   renderFiles();
   renderOutline(null);

@@ -390,7 +390,10 @@ def cmd_repair(args):
     deck = pipeline.load_json(_abs(args.spec))
     stem = args.name or _stem(args.spec).replace('.deck', '')
     out_pptx = _abs(args.out or os.path.join(SAMPLES, stem + '.pptx'))
-    rounds = args.rounds or 3
+    # 没给 `--rounds` 就跟 Web 端同源读 `.env`。不能用 `args.rounds or ...`：
+    # `--rounds 0`（明确要求不修）会被 `or` 当成没给而顶回默认值。
+    rounds = (cfg_mod.repair_rounds() if args.rounds is None
+              else max(0, args.rounds))
 
     state = {'before': None}
 
@@ -746,13 +749,15 @@ def main():
     p.add_argument('--spec', required=True)
     p.add_argument('--name')
     p.add_argument('--out')
-    p.add_argument('--rounds', type=int, default=3)
+    p.add_argument('--rounds', type=int, default=None,
+                   help='最大修复轮数，不给则取 .env 的 PPTGEN_REPAIR_ROUNDS')
     p.add_argument('--template')
 
     p = sub.add_parser('full', help='大纲 → 规划 → 修复 → 渲染 一条命令走完')
     p.add_argument('--src', required=True)
     p.add_argument('--name')
-    p.add_argument('--rounds', type=int, default=3)
+    p.add_argument('--rounds', type=int, default=None,
+                   help='最大修复轮数，不给则取 .env 的 PPTGEN_REPAIR_ROUNDS')
     p.add_argument('--yes', action='store_true',
                    help='跳过人工确认直接往下走（默认会在大纲处停下）')
 

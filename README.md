@@ -66,7 +66,8 @@ python run.py config     # 看当前配置状态
 | `PPTGEN_MIN_PAGES` / `PPTGEN_MAX_PAGES` | 13 / 18 | 正文页数区间。**章节分隔页不占这个额度**（见上文 ④） |
 | `PPTGEN_SECTION_DIVIDERS` | `1` | 是否在正文里插入章节分隔页；设 `0` 关掉 |
 | `PPTGEN_OUTLINE_SEGMENT` | `1` | 骨架分不出章 / 分得太碎时，是否让模型把页单元归成几章（见上文 ①″）；设 `0` 关掉，退回纯确定性 |
-| `PPTGEN_CONTENT_MODE` | `balance` | `strict` 只做结构整理 / `balance` 允许合并提炼 / `enrich` 可补写过渡。Web 端这一项是**每次现选**的（「内容策略」下拉，初值就是 `.env` 里这个值） |
+| `PPTGEN_CONTENT_MODE` | `balance` | 内容取舍口径，界面上的「内容策略」下拉：`strict` = **严格参照文档**（只做结构整理）/ `balance` = **适当扩展内容**（允许合并提炼，数字与专有名词必须保留）/ `enrich` = **大量拓展内容**（可补写过渡与解释）。Web 端这一项是**每次现选**的，初值就是 `.env` 里这个值 |
+| `PPTGEN_REPAIR_ROUNDS` | `3` | 几何修复回环的**最大**轮数（某一轮检查干净就提前停）。**界面上没有这一项**，要改就改这里；CLI 单次可用 `--rounds N` 覆盖 |
 | `PPTGEN_OUTLINE_MAX_TOKENS` / `PPTGEN_PLAN_MAX_TOKENS` | 取 `max(PPTGEN_MAX_TOKENS, 16000)` | 两个阶段的输出上限。**推理模型会把额度烧在 reasoning 上**，给小了正文直接为空、静默退回兜底（实测 `deepseek-flash` 给 8000 就烧掉 8000） |
 
 ---
@@ -151,7 +152,7 @@ Web 结果区那些逐页预览图的清晰度由 `PPTGEN_PREVIEW_WIDTH` /
 %PY% run.py outline --src "Dify 介绍与实战.pptx"     :: 生成大纲
 ::   → 打开 out\plans\*.outline.json 审阅修改
 %PY% run.py plan    --outline "out\plans\x.outline.json"
-%PY% run.py repair  --spec    "out\plans\x.deck.json" --rounds 3
+%PY% run.py repair  --spec    "out\plans\x.deck.json"  :: 轮数取 .env；--rounds N 可覆盖
 %PY% run.py qa
 %PY% run.py render
 ```
