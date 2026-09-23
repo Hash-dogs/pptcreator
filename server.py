@@ -838,11 +838,6 @@ def _revisions_path(stem: str) -> str:
     return os.path.join(PLANS, stem + '.revisions.json')
 
 
-def _officecli_ok() -> bool:
-    from pptgen.qa import visual
-    return bool(visual.find_officecli())
-
-
 def _preview_sig() -> str:
     """预览渲染的「配方」指纹，进 `.pptx-stamp` 用。
 
@@ -1379,16 +1374,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == '/api/config':
             cfg_mod.load_env()
-            llm, vis = cfg_mod.llm_config(), cfg_mod.vision_config()
-            lo, hi = cfg_mod.page_range()
+            # 只报界面真的读的三项（见 `web/app.js` 的 `boot()`）：上传框的扩展名与
+            # 体积上限、内容策略下拉的初值。模型名 / 页数区间 / 模板 / officecli
+            # 那几项原来是喂左侧栏那块小字的，字去掉之后它们没有任何消费者 ——
+            # 排查要看的是 `run.py config`，那份会打印全部。
             return self._json(dict(
-                llm=(llm.model if llm else None),
-                vision=(vis.model if vis else None),
-                pages=[lo, hi], mode=cfg_mod.content_mode(),
-                template=os.path.basename(cfg_mod.template_path()),
-                officecli=_officecli_ok(),
+                mode=cfg_mod.content_mode(),
                 max_upload=MAX_UPLOAD,
-                log=cfg_mod.log_enabled(), log_dir=LOGS,
                 exts=list(SOURCE_EXT)))
 
         if p == '/api/sources':

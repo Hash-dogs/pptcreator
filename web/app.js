@@ -114,14 +114,6 @@ async function boot() {
     if ([...$('contentMode').options].some((o) => o.value === c.mode)) {
       $('contentMode').value = c.mode;
     }
-    $('cfg').innerHTML =
-      '<div>文本模型 <b class="' + (c.llm ? '' : 'off') + '">'
-      + esc(c.llm || '未配置') + '</b></div>'
-      + '<div>视觉模型 <b class="' + (c.vision ? '' : 'off') + '">'
-      + esc(c.vision || '未配置') + '</b></div>'
-      + '<div>页数 ' + c.pages[0] + '–' + c.pages[1]
-      + ' · 渲染 <b class="' + (c.officecli ? '' : 'off') + '">'
-      + (c.officecli ? 'officecli' : '缺失') + '</b></div>';
 
     const srcs = await api('/api/sources');
     const sel = $('src');
@@ -146,7 +138,7 @@ async function boot() {
       setStatus('已恢复 ' + state.uploads.length + ' 个上传文件');
     }
   } catch (e) {
-    $('cfg').innerHTML = '<b style="color:#D31245">无法连接服务</b>';
+    // 只走状态栏：左侧栏那块「模型 / 渲染」小字已经去掉，这里不再有第二个落点
     setError('无法连接服务：' + e.message);
   }
 }
