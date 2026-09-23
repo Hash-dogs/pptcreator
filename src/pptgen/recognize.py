@@ -98,6 +98,11 @@ intents 只能取下面这些（括号里是含义）：
      别让一段话超出你给它的框 —— 程序会把放不下的字**截断**，那版就不合格。
   3. `min_items`/`max_items` 是你这套构图能舒服容纳的条目数范围。
   4. name 不要与已有版式重名。
+  5. **页面里嵌的截图 / 图片 / 图表截图一律不要建区块。** 版式描述的是**版面结构**
+     （几栏、每栏放什么文字内容），图区里的东西是**内容**不是版式。那一带留空即可 ——
+     试片里那块是空的，不会被当成错误。
+  6. 序号/要点前面的**底色块、圆角方块、徽标**这类装饰不要单独建区块 —— 用
+     `bullets` 的序号表达就够了（颜色与底色是版式的样式，不是结构）。
 """ % (kinds, roles, intents)
     if feedback:
         p += ('\n⚠️ 上一轮的结果有以下问题，这次**必须**修正：\n' + feedback + '\n')
@@ -107,14 +112,27 @@ intents 只能取下面这些（括号里是含义）：
 VERIFY_PROMPT = """下面两张图：第一张是用户给的**版式截图**，第二张是用识别结果
 渲染出来的**同版式试片**（内容文字不同，那是示例文案）。
 
-判断第二张是否复现了第一张的**版面构图** —— 看的是：分栏数与区块数量、
-各区块之间的位置关系与相对大小、层级（谁大谁小）、是否有通栏色带或分隔线。
+判断试片是否复现了截图的**版面分区** —— 只看三件事：
+  1. 分成几栏 / 几个区块；
+  2. 各区块之间的**位置关系**（谁在左、谁在上、谁占满整宽）；
+  3. 各区块的**相对大小**（主区是不是还是那么大、有没有多出或少掉一整块）。
 
-**忽略**这些差异：文字内容不同、字体渲染差异、配色微差、logo/装饰弧线、
-截图本身的背景与边框。
+**这些一律不算不一致**（试片本来就做不到，或属于内容层面）：
+  - 页面里嵌入的**截图 / 图片 / 图表**及其所在区域 —— 版式不承载图片内容，
+    试片里那一带是空的，属正常；
+  - 序号或要点前的**底色块、圆角方块、徽标、图标**；
+  - 字体、字号微差，配色深浅，是否通栏色带；
+  - 文字内容本身（示例文案与截图上的字不同是必然的）；
+  - 截图外框、水印、公司 logo、装饰弧线。
 
 只输出一行 JSON，不要解释：
-{"consistent": true 或 false, "reason": "不超过 40 字；false 时说明差在哪"}"""
+{"consistent": true 或 false,
+ "kind": "structure" 或 "detail" 或 "none",
+ "reason": "不超过 40 字"}
+
+`kind` 的含义：`structure` = 分栏数 / 区块位置 / 相对大小对不上（版面分区没复现）；
+`detail` = 分区是对的，只差上面那份「不算不一致」清单里的东西；`none` = 没看出差异。
+`consistent` 与 `kind` 要一致：只有 `kind` 是 `structure` 时才该是 `false`。"""
 
 
 # ══════════════════════════════════════════════════════════════
@@ -275,21 +293,28 @@ def gate(trial: dict) -> list[str]:
 # ══════════════════════════════════════════════════════════════
 
 def verify_consistency(original_png: str, trial_png: str, cfg=None) -> dict:
-    """原图 vs 试片：构图是否一致。→ `{consistent, reason}`。
+    """原图 vs 试片：构图是否一致。→ `{consistent, kind, reason}`。
 
     这一步是**用户不能对话修正**的替代：识别得像不像，只能让模型自己再看一眼。
     没配视觉模型/拿不到试片图时返回 `consistent=None`（= 不判定，不阻断）。
+
+    `kind` 区分**结构性**与**装饰性**差异（`structure` / `detail` / `none`）：
+    只有结构性的才拦人。装饰性的差异是必然存在的 —— 试片用声明式渲染器画，
+    序号没有底色块、图区是空的，这些不是「版式没认出来」。
     """
     cfg = cfg or config.vision_config()
     if not cfg or not original_png or not trial_png:
-        return dict(consistent=None, reason='没有可用的视觉模型或试片图，跳过构图比对')
+        return dict(consistent=None, kind='', reason='没有可用的视觉模型或试片图，跳过构图比对')
     try:
         got = llm.ask_vision_json(VERIFY_PROMPT, [original_png, trial_png], cfg)
     except llm.LLMError as e:
-        return dict(consistent=None, reason='构图比对失败：%s' % str(e)[:80])
+        return dict(consistent=None, kind='', reason='构图比对失败：%s' % str(e)[:80])
     if not isinstance(got, dict) or 'consistent' not in got:
-        return dict(consistent=None, reason='构图比对返回不认识的结构')
-    return dict(consistent=bool(got.get('consistent')),
+        return dict(consistent=None, kind='', reason='构图比对返回不认识的结构')
+    kind = str(got.get('kind') or '').strip().lower()
+    if kind not in ('structure', 'detail', 'none'):
+        kind = ''                      # 模型没按契约给 kind：按老口径（以 consistent 为准）
+    return dict(consistent=bool(got.get('consistent')), kind=kind,
                 reason=str(got.get('reason') or '')[:120])
 
 
@@ -345,8 +370,14 @@ def recognize(image_png: str, work_dir: str, *, cfg=None, template: str | None =
 
         bad = gate(trial)
         verify = verify_consistency(image_png, trial.get('png'), cfg)
-        if verify.get('consistent') is False:
+        if verify.get('consistent') is False and verify.get('kind') != 'detail':
+            # 只有**结构性**差异才拦人。`detail` 的差异（序号没底色块、图区是空的、
+            # 配色深浅）是声明式渲染的必然结果，不是「版式没认出来」—— 早先一并拦下，
+            # 结果「左文右图 + 序号带底色块」这类页面永远入不了库（实测）。
             bad.append('渲染出来与截图构图不一致：%s' % verify.get('reason'))
+        elif verify.get('kind') == 'detail':
+            meta.setdefault('_notes', []).append(
+                '试片与截图只差装饰层面（不影响采用）：%s' % verify.get('reason'))
         if bad:
             log('[recognize]   试片不合格：%s' % '；'.join(bad))
             attempts.append(dict(round=rd, problems=bad, verify=verify))

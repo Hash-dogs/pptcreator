@@ -85,31 +85,51 @@ def ask_text(prompt: str, cfg: config.LLMConfig | None = None,
 
 
 def parse_json(raw: str) -> dict:
-    """宽容解析模型返回的 JSON（剥 ``` 围栏 / 截取最外层大括号 / 裸数组包一层）。
+    """宽容解析模型返回的 JSON。
 
-    抽成公开函数是因为**视觉调用也要它** —— `ask_vision` 走 `response_format`
-    在某些服务上不生效，返回的仍可能是带围栏的文本。
+    四种形态都要吃下来（前两种是实测撞到的）：
+
+    ① **服务端把 `response_format` 回显进正文**：`{"type": "json_object"}\\n{真正的 JSON}`。
+       实测某兼容层这么干过。取「最外层大括号」会把这个回显和真正的对象**跨成一个**
+       非法 JSON，于是整个解析失败 —— 识别链路的第一轮就是这么挂的。
+    ② 正文里**两个对象拼在一起**（回显之外还可能有前言后语）。
+    ③ 带 ``` 围栏（有的模型无视 json_mode）。
+    ④ 裸数组（包一层 `items`）。
+
+    做法：从每个 `{` 起用 `raw_decode` 试，取**第一个解析得出、且不止含 `type` 的
+    对象** —— 「只含 type 的对象」正是回显的形状，跳过它继续找。
     """
     txt = (raw or '').strip()
     if txt.startswith('```'):
         txt = txt.split('\n', 1)[1] if '\n' in txt else txt
         txt = txt.rsplit('```', 1)[0]
-    try:
-        return json.loads(txt)
-    except json.JSONDecodeError:
-        pass
-    i, j = txt.find('{'), txt.rfind('}')
-    if i >= 0 and j > i:
+
+    dec = json.JSONDecoder()
+    # 裸数组**先试**：它可能是一串对象，而下面「取第一个 `{`」会把后面的全丢掉
+    # （静默丢数据比解析失败更糟）。只有当 `[` 出现在第一个 `{` **之前**才这么判 ——
+    # 否则回显对象里的 `{` 会被误当成数组的开头。
+    ia, ib = txt.find('['), txt.rfind(']')
+    io = txt.find('{')
+    if ia >= 0 and ib > ia and (io < 0 or ia < io):
         try:
-            return json.loads(txt[i:j + 1])
+            arr = json.loads(txt[ia:ib + 1])
         except json.JSONDecodeError:
-            pass
-    i, j = txt.find('['), txt.rfind(']')
-    if i >= 0 and j > i:
+            arr = None
+        if isinstance(arr, list):
+            return {'items': arr}
+    i = 0
+    while i < len(txt):
+        j = txt.find('{', i)
+        if j < 0:
+            break
         try:
-            return {'items': json.loads(txt[i:j + 1])}
-        except json.JSONDecodeError:
-            pass
+            obj, end = dec.raw_decode(txt[j:])
+        except ValueError:
+            i = j + 1                       # 这个 `{` 起头解不出来，换下一个
+            continue
+        if isinstance(obj, dict) and set(obj) - {'type'}:
+            return obj
+        i = j + max(end, 1)                 # 只含 type 的回显对象：跳过，接着找
     raise LLMError('模型未返回可解析的 JSON：%s' % raw[:400])
 
 

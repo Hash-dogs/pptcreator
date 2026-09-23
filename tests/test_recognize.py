@@ -210,6 +210,27 @@ class TestRecognizeLoop(unittest.TestCase):
         self.assertTrue(any('构图不一致' in p
                             for a in got['attempts'] for p in a['problems']))
 
+    def test_detail_only_difference_does_not_block(self):
+        """只差装饰层面（序号没底色块、图区是空的、配色深浅）不该拦人。
+
+        这一步卡死过真实页面：一页「左栏编号步骤 + 右栏截图 + 底部灰条」的截图，
+        构图认得很准，却因为试片里没有那块截图、序号没底色块而永远入不了库。
+        """
+        self._stub(GOOD, verify=dict(consistent=False, kind='detail',
+                                     reason='右栏图区为空、序号无底色块'))
+        got = recognize.recognize(self.img, self.work, cfg=CFG, rounds=1,
+                                  on_log=lambda m: None)
+        self.assertTrue(got['ok'], got.get('reason'))
+        self.assertTrue(any('装饰' in n for n in got['meta'].get('_notes') or []),
+                        got['meta'].get('_notes'))
+
+    def test_structural_mismatch_still_blocks(self):
+        self._stub(GOOD, verify=dict(consistent=False, kind='structure',
+                                     reason='截图是两栏，试片是单栏'))
+        got = recognize.recognize(self.img, self.work, cfg=CFG, rounds=1,
+                                  on_log=lambda m: None)
+        self.assertFalse(got['ok'])
+
     def test_prompt_lists_every_block_kind(self):
         """提示词里的区块清单从代码生成 —— 它必须覆盖渲染器认识的全部种类。"""
         from pptgen import layout_dsl
