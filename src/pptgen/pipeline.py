@@ -213,13 +213,26 @@ def overflow_reason(sl: dict) -> str:
 # ① 大纲
 # ══════════════════════════════════════════════════════════════
 # 章节数上限。与 `_divider_budget()` 的判据同源：分隔页是每章一页的结构页，
-# 章数一多就把页数预算吃光（`hi >= 章数 × 2` 才插得下分隔页），正文反而没页了。
+# 章数一多就把页数预算吃光（`hi >= 章数 × 3` 才插得下分隔页），正文反而没页了。
 _MAX_CHAPTERS = 7
+
+# 一章最少要占几页预算：一页分隔 + 两页正文。分隔页只是结构，正文才是内容 ——
+# 一章只剩一页正文时，整份 deck 会退化成「隔断 + 一句话」的复读机。
+_DIVIDER_MIN_PAGES = 3
 
 
 def _chapter_cap(hi: int) -> int:
-    """这份 deck 最多几章：一页分隔 + 一页正文，每章至少两页预算。"""
+    """这份 deck 最多几章（**太碎的护栏**，不是分隔页预算）。"""
     return max(2, min(_MAX_CHAPTERS, hi // 2))
+
+
+def _segment_target(hi: int) -> int:
+    """自创分章时的目标章数上限：一章 = 一页分隔 + 两页正文。
+
+    早先这里是写死的 6（`min(cap, 6)`），而模型**每次都取上限** —— 于是无论
+    上传什么文档，分章兜底出来的都是 6 章。改成按页数预算推：12 页上限 → 最多 4 章。
+    """
+    return max(2, min(_chapter_cap(hi), hi // _DIVIDER_MIN_PAGES))
 
 
 def _needs_segment(n_chapters: int, n_pages: int, hi: int) -> bool:
@@ -324,10 +337,13 @@ def _segment_chapters(doc: dict, sk: dict, hi: int, cfg, log=print) -> dict | No
     n = len(units)
     cap = _chapter_cap(hi)
     lo_n = max(2, min(3, n))
+    # 目标章数由**页数预算**推（见 `_segment_target`），不是写死的区间：
+    # 目标是上限，模型爱取上限，所以上限本身得是「这份 deck 装得下的章数」。
+    top = max(lo_n, _segment_target(hi))
     if not _needs_segment(len(sk.get('chapters') or []), n, hi):
         return None
     log('[outline] 骨架给出 %d 章 / %d 个页单元，交给模型重新分章（目标 %d–%d 章）'
-        % (len(sk.get('chapters') or []), n, lo_n, min(cap, 6)))
+        % (len(sk.get('chapters') or []), n, lo_n, top))
 
     groups = None
     if cfg is not None and config.outline_segment():
@@ -339,7 +355,7 @@ def _segment_chapters(doc: dict, sk: dict, hi: int, cfg, log=print) -> dict | No
                             p.get('chars', 0)))
         doc_title = (doc.get('title') or doc.get('source') or '').strip()
         prompt = f"""下面是一份长文档{('《%s》' % doc_title) if doc_title else ''}的**页单元**清单
-（解析层切好的，顺序就是文档顺序）。请把它们归成 {lo_n}–{min(cap, 6)} 章，
+（解析层切好的，顺序就是文档顺序）。请把它们归成 {lo_n}–{top} 章，
 供一份中文汇报 PPT 使用。
 
 {chr(10).join(items)}
@@ -350,6 +366,8 @@ def _segment_chapters(doc: dict, sk: dict, hi: int, cfg, log=print) -> dict | No
 - 章名是 4–14 字的名词短语，**不要写章节号**（编号由代码统一给），
   不加书名号/引号，不以句号结尾。
 - 按内容逻辑分章：不要把 1 个页单元单独分成一章，也不要让某一章吃掉大半份文档。
+- **章数宁少勿多**：{top} 章是上限不是目标 —— 内容撑不起这么多章就往下取，
+  别为了凑数硬拆。这份 deck 正文一共 {hi} 页，一章平均摊到 2–3 页。
 - {_mode_hint()}
 
 只输出 JSON：
@@ -372,7 +390,8 @@ def _segment_chapters(doc: dict, sk: dict, hi: int, cfg, log=print) -> dict | No
             return None
         # 「章太多」则是**内容会被丢**：章数超过页数预算时，`_compress_sections`
         # 会把排不上的章整章丢掉。均分至少保住每一页都还在某一章里。
-        groups = [(units[a - 1]['name'], a, b) for a, b in _even_groups(n, cap)]
+        # 均分的份数也用 `top`：均分成 6 章，每章正文就只剩一页了。
+        groups = [(units[a - 1]['name'], a, b) for a, b in _even_groups(n, top)]
         method = 'even_split'
     else:
         method = 'llm_segment'
@@ -423,7 +442,7 @@ def make_outline(doc: dict, on_log=None) -> dict:
     if cfg is not None:
         try:
             out = _outline_by_llm(doc, src, lo, hi, cfg, log)
-            out = _add_dividers(out, doc, log)
+            out = _add_dividers(out, doc, n_div, log)
             out['_meta'] = dict(generated_by='llm', model=cfg.model,
                                 warnings=out.pop('_warnings', []))
             return out
@@ -434,12 +453,12 @@ def make_outline(doc: dict, on_log=None) -> dict:
             warn = '%s: %s' % (type(e).__name__, e)
             log('[outline] 模型调用失败，退回确定性大纲：%s' % e)
             out = _outline_fallback(doc, lo, hi)
-            out = _add_dividers(out, doc, log)
+            out = _add_dividers(out, doc, n_div, log)
             out['_meta'] = dict(generated_by='fallback', model=cfg.model,
                                 warnings=[warn])
             return out
     out = _outline_fallback(doc, lo, hi)
-    out = _add_dividers(out, doc, log)
+    out = _add_dividers(out, doc, n_div, log)
     out['_meta'] = dict(generated_by='fallback', model=None,
                         warnings=['未配置文本模型（PPTGEN_LLM_*），'
                                   '大纲走确定性兜底，未经过模型提炼'])
@@ -452,8 +471,16 @@ def make_outline(doc: dict, on_log=None) -> dict:
 def _divider_budget(doc: dict, lo: int, hi: int) -> tuple[int, int, int]:
     """决定插不插章节分隔页，返回 (分隔页数, 正文页下限, 正文页上限)。
 
-    判据是「扣掉分隔页后，每章至少还留得下一页正文」。装不下就**完全不插**，
-    而不是硬塞或砍正文 —— 正文是内容，结构是锦上添花。
+    判据是「扣掉分隔页后，每章至少还留得下**两页**正文」（`hi >= 章数 × 3`）。
+    装不下就**完全不插**，而不是硬塞或砍正文 —— 正文是内容，结构是锦上添花。
+
+    早先这条线划在「每章留得下一页」，于是 12 页上限 / 6 章正好踩线通过：
+    6 页分隔 + 6 页正文，每章恰好一页 —— 无论上传什么文档，出来的都是
+    「六章、每章两页」的同一副骨架。正文页数才是这份 deck 的内容厚度，
+    结构页不该把它压到每章一句话。
+
+    **区间宽度要跟着一起减**：`lo` 不同步下移的话，它会撞上新的 `hi`，
+    页数区间就塌成单点（实测「正文按 10–10 页控制」），模型连一页浮动余地都没有。
 
     关掉：`.env` 里设 `PPTGEN_SECTION_DIVIDERS=0`。
     """
@@ -461,19 +488,25 @@ def _divider_budget(doc: dict, lo: int, hi: int) -> tuple[int, int, int]:
         return 0, lo, hi
     chapters = (doc.get('structure') or {}).get('chapters') or []
     n = len(chapters)
-    if n < 2 or hi < n * 2:
+    if n < 2 or hi < n * _DIVIDER_MIN_PAGES:
         return 0, lo, hi
-    return n, min(lo, hi - n), hi - n
+    span = hi - lo
+    hi -= n
+    return n, max(1, hi - span), hi
 
 
-def _add_dividers(outline: dict, doc: dict, log=print) -> dict:
-    """给每章开头插一页章节隔断。
+def _add_dividers(outline: dict, doc: dict, n_div: int, log=print) -> dict:
+    """给每章开头插一页章节隔断。`n_div` 是 `_divider_budget()` 的结论。
 
     **规则插入而不是让模型挑**：隔断页是结构页，它没有内容可依据 ——
     让模型在版式库里「选」一个结构页，只会选错。借鉴 PPTAgent 的
     `_add_functional_layouts()`：功能性版式按位置规则插入，不参与内容驱动的选择。
+
+    `n_div` 必须由预算说了算：早先这里只看 `PPTGEN_SECTION_DIVIDERS` 和章数，
+    预算那边判「装不下、不插」时这里照样插 —— 正文已经按满页生成了，再硬塞
+    章数页分隔页，总页数直接超标，那条「装不下就不插」的规则从来没生效过。
     """
-    if not config.section_dividers():
+    if n_div <= 0:
         return outline
     chapters = (doc.get('structure') or {}).get('chapters') or []
     sections = outline.get('sections') or []
@@ -573,6 +606,22 @@ def _structure_block(sk: dict) -> str:
     return ('源文档的章节结构如下（**章节划分以它为准**，一章不少、不改名、不合并）：\n\n'
             '<structure>\n%s\n</structure>\n\n共 %d 章。\n'
             % (structure.skeleton_digest(sk), len(chapters)))
+
+
+def _quota_block(chapters: list[dict], quota: list[int]) -> str:
+    """各章正文页数建议 —— 按原文分量分配，**不是均分**。
+
+    短文档（一次调用）原本没有任何页数分配信号，模型只能自己拍脑袋，而它拍出来
+    的永远是最省事的那种：6 章 6 页 = 每章一页。长文档那条分片路径一直在用
+    `_allocate`（按各章源页数比例、每章保底一页），这里把它搬到台面上，
+    两条路径给出一致的分量口径 —— 内容厚的章多给几页，收尾章一页也够。
+    """
+    if not chapters or len(chapters) != len(quota):
+        return ''
+    rows = ['　%s：%d 页' % (c.get('name') or '未命名章节', k)
+            for c, k in zip(chapters, quota)]
+    return ('各章的正文页数按原文分量分配（**不必均等**，每章可上下浮动 1 页；'
+            '内容厚的章要真的展开，别把每章都压成一页）：\n' + '\n'.join(rows) + '\n')
 
 
 def _outline_by_llm(doc, src, lo, hi, cfg, log=print) -> dict:
@@ -861,6 +910,9 @@ def _outline_oneshot(doc, src, lo, hi, cfg, sk, feedback=None) -> dict:
     if feedback:
         fix = ('\n⚠️ 上一轮的结果有以下问题，这次**必须**修正：\n'
                + '\n'.join('- %s' % p for p in feedback) + '\n')
+    chapters = (sk or {}).get('chapters') or []
+    quota = _quota_block(
+        chapters, _allocate([len(c.get('pages') or []) for c in chapters], hi))
     prompt = f"""你在为一份中文汇报 PPT 设计大纲。
 
 {_structure_block(sk)}
@@ -875,7 +927,7 @@ def _outline_oneshot(doc, src, lo, hi, cfg, sk, feedback=None) -> dict:
 - **章节沿用上面的结构**：一章不少，章名用给定的。
 - 正文总页数控制在 {lo}–{hi} 页之间（不含封面/目录/封底）。
 - 每章至少 1 页；**页可以在章内合并，章节不可合并、不可丢弃**。
-- 每页给一个**具体的、有信息量的标题**，不要「概述」「简介」这类空标题。
+{quota}- 每页给一个**具体的、有信息量的标题**，不要「概述」「简介」这类空标题。
 {_TITLE_RULE}- 每页标注最适合的展示形态 hint（如「对比表」「流程图」「三个并列要点」「一个核心数字」）。
 - 每页给 source（来源标注），并给 anchor：填它主要取材的那条源页标题（照抄上面的）。
 - {_mode_hint()}

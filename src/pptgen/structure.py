@@ -51,6 +51,12 @@ _SRC_NUM_RE = re.compile(
     r'|(?:Chapter|Part|Section)\s*\d{1,3}\s*[:.、]?\s*'
     r'|\d{1,3}\s*[、.．]?\s+)', re.I)
 
+# 书签里的**占位名**：Acrobat 会给没命名的书签自动起名（`书签 1` / `書籤 1` /
+# `Bookmark 1`）。实测那份 Synology 白皮书的第一条书签就是它 —— 而且它落在的
+# 页面上没有任何标题，拿它当第 1 章只会白占一页分隔页加一页模型凭空编的正文。
+_PLACEHOLDER_TITLE_RE = re.compile(
+    r'^(?:書籤|书签|標籤|标签|Bookmark|Untitled|未命名|无标题)\s*\d*$', re.I)
+
 # 标题长度上限（book-to-skill 的护栏：超长的多半是段落不是标题）。
 _MAX_TITLE_CHARS = 80
 
@@ -88,6 +94,16 @@ def is_title_like(t: str) -> bool:
     「解析层认为是标题、大纲层认为是噪声」这种自相矛盾。
     """
     return len(_WORDCHAR_RE.findall(t or '')) >= 4
+
+
+def placeholder_title(t: str) -> bool:
+    """这条标题是不是**工具自动起的占位名**（`书签 1` / `Bookmark 3` / `未命名`）。
+
+    只有 PDF 书签树会这么写（人写的标题不会叫「书签 1」），所以这道尺子只用在
+    书签那条路上：书签不当章（`_marks_from_outline`），它的标题块也不当页单元
+    （`_assemble`，否则被下一章的区间前扩吸收，变成一张标题叫「书签 1」的页）。
+    """
+    return bool(_PLACEHOLDER_TITLE_RE.match((t or '').strip()))
 
 
 def front_title(t: str) -> bool:
@@ -149,7 +165,9 @@ def _marks_from_outline(blocks: list[dict], outline: list[dict]) -> list[dict]:
         return []
     lvl = min(e.get('level', 0) for e in entries)
     entries = [e for e in entries
-               if e.get('level', 0) == lvl and not front_title(e['title'])]
+               if e.get('level', 0) == lvl
+               and not front_title(e['title'])
+               and not placeholder_title(e['title'])]
     if len(entries) < 2:
         return []
 
@@ -271,6 +289,17 @@ def _collapse(marks: list[dict]) -> list[dict]:
 # ══════════════════════════════════════════════════════════════
 # ② 骨架
 # ══════════════════════════════════════════════════════════════
+def _span_chars(blocks: list[dict], start: int, end: int) -> int:
+    """一个块区间里有几个字（**不算占位标题**）。
+
+    占位标题（`书签 1`）不是内容：把它算进字数，一个只剩它的章就「有正文」了，
+    于是躲过空章过滤，最后变成一页模型凭空编出来的正文。
+    """
+    return sum(len(block_text(blocks[x])) for x in range(start, end)
+               if not (blocks[x]['type'] == 'heading'
+                       and placeholder_title(blocks[x]['text'])))
+
+
 def _page_lead(blocks: list[dict], start: int, end: int, limit: int = 60) -> str:
     """一页的「首句」——取标题之后的头一段正文，压到 limit 字。"""
     for x in range(start + 1, end):
@@ -282,7 +311,26 @@ def _page_lead(blocks: list[dict], start: int, end: int, limit: int = 60) -> str
     return ''
 
 
-def _assemble(blocks: list[dict], marks: list[dict], method: str) -> dict:
+def _renumber(chapters: list[dict]) -> list[dict]:
+    """把 `01 章名` 的序号重排一遍。
+
+    只在书签路径上用：那里的 `01` 是**代码给的 deck 编号**（源编号已被剥掉），
+    丢掉一个空章就会留出「`02 Introduction` 打头、却找不到 01」的窟窿。别的路径
+    的章名是原文标题（`第 3 章 总则`），那属于源文档的说法，不能动。
+    """
+    out = []
+    for i, c in enumerate(chapters):
+        # 只剥「两位以内的数字 + 空格」这种代码自己加的编号，源编号在
+        # `_marks_from_outline` 里已经剥过一次了。
+        base = re.sub(r'^\d{1,2}\s+', '', c['name']).strip() or c['name']
+        c = dict(c)
+        c['name'] = '%02d %s' % (i + 1, base)
+        out.append(c)
+    return out
+
+
+def _assemble(blocks: list[dict], marks: list[dict], method: str,
+              renumber: bool = False) -> dict:
     """把章节标记展开成「章节 → 页」的两层结构，并算出块区间。"""
     n = len(blocks)
     # front matter 要标**整页**，不能只标那个标题块 —— 封面的装饰文字
@@ -317,18 +365,27 @@ def _assemble(blocks: list[dict], marks: list[dict], method: str) -> dict:
             # 分隔页自身是**章名**，不是这一章的内容页，别把它算成第一页
             if b.get('role') == 'divider':
                 continue
+            # 占位标题（`书签 1`）也不当页单元：书签被滤掉之后，它的标题块会
+            # 被下一章的区间前扩吸收进来，然后变成一张标题叫「書籤 1」的页。
+            if placeholder_title(b['text']):
+                continue
             p_end = next((x for x in range(j + 1, end)
                           if blocks[x]['type'] == 'heading'), end)
             pages.append(dict(name=b['text'], start=j, end=p_end,
                               lead=_page_lead(blocks, j, p_end),
-                              chars=sum(len(block_text(blocks[x]))
-                                        for x in range(j, p_end))))
+                              chars=_span_chars(blocks, j, p_end)))
         chapters.append(dict(
             key=m['key'], name=m['name'] or m['key'],
             subtitle=head_blk.get('subtitle', ''),
             start=start, end=end,
-            chars=sum(len(block_text(blocks[x])) for x in range(start, end)),
+            chars=_span_chars(blocks, start, end),
             pages=pages))
+    # **空章要丢掉**：既没有页单元、又没有正文的章，是书签落在了一个没有标题的
+    # 页上（实测那份白皮书的第一条书签就是），区间宽度甚至是 0。留着它，大纲会
+    # 给它编一页正文、分隔页也照插一页 —— 两页预算换一页模型瞎编的内容。
+    chapters = [c for c in chapters if c['pages'] or c['chars']]
+    if renumber:
+        chapters = _renumber(chapters)
     return dict(chapters=chapters, method=method, front_matter=sorted(front))
 
 
@@ -381,27 +438,37 @@ def build_skeleton(blocks: list[dict], kind: str = '',
     if not blocks:
         return dict(chapters=[], method='flat', front_matter=[])
 
+    def assembled(marks: list[dict], method: str, renumber: bool = False):
+        """标记 → 骨架。空章被丢掉之后不足 2 章的，视同这条路没抽出来。
+
+        判据得看**丢完之后**的章数：书签树可能整份都是占位名加空章，
+        标记数够而真章数不够，那就该往下一个方法退化。
+        """
+        if len(marks) < 2:
+            return None
+        sk = _assemble(blocks, marks, method, renumber=renumber)
+        return sk if len(sk['chapters']) >= 2 else None
+
     # ① 文档自带的目录（PDF 书签树）—— 最硬：这是文档作者自己划的章节
-    marks = _collapse(_marks_from_outline(blocks, outline or []))
-    if len(marks) >= 2:
-        return _assemble(blocks, marks, 'outline')
+    sk = assembled(_collapse(_marks_from_outline(blocks, outline or [])),
+                   'outline', renumber=True)
+    if sk:
+        return sk
 
     # ② pptx 专用：分隔页 / kicker（是版面事实）
-    marks = _collapse(_marks_from_roles(blocks))
-    if len(marks) >= 2:
-        return _assemble(blocks, marks, 'divider')
+    sk = assembled(_collapse(_marks_from_roles(blocks)), 'divider')
+    if sk:
+        return sk
 
     # ③ 标题层级（docx 的 Heading、md 的 `#`、pdf 升出来的标题）
-    marks = _collapse(_marks_from_text(blocks, 'depth'))
-    if len(marks) >= 2:
-        return _assemble(blocks, marks, 'depth')
+    sk = assembled(_collapse(_marks_from_text(blocks, 'depth')), 'depth')
+    if sk:
+        return sk
 
     # ④ 纯文本：显式数字标题
-    marks = _collapse(_marks_from_text(blocks, 'numeric'))
-    if len(marks) >= 2:
-        sk = _assemble(blocks, marks, 'numeric')
-        if _plausible(sk):
-            return sk
+    sk = assembled(_collapse(_marks_from_text(blocks, 'numeric')), 'numeric')
+    if sk and _plausible(sk):
+        return sk
 
     # ⑤ 都不成立
     return _flat(blocks)

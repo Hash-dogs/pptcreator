@@ -240,6 +240,57 @@ class TestCompression(unittest.TestCase):
             self.assertIn(c['name'], txt)
 
 
+class TestPageQuota(unittest.TestCase):
+    """各章正文页数**按原文分量分配**，不是每章一页。
+
+    实测的病：12 页上限 / 6 章时，分隔页把正文预算压成 6–6 页，于是每章恰好
+    一页 —— 无论上传什么文档，大纲都是「六部分、每部分两页」的同一副骨架。
+    """
+
+    @staticmethod
+    def _unit(i):
+        return dict(name='源页 %d' % i, start=i, end=i + 1, lead='', chars=100)
+
+    def setUp(self):
+        self.chapters = [dict(name='01 开篇', pages=[self._unit(1)]),
+                         dict(name='02 主体', pages=[self._unit(i) for i in range(2, 8)]),
+                         dict(name='03 收尾', pages=[self._unit(9)])]
+
+    def _quota(self, hi=12):
+        return pipeline._allocate([len(c['pages']) for c in self.chapters], hi)
+
+    def test_quota_follows_the_source_weight(self):
+        quota = self._quota()
+        self.assertEqual(sum(quota), 12)
+        self.assertGreater(quota[1], quota[0], '内容厚的章该多拿页')
+        self.assertGreater(quota[1], quota[2])
+
+    def test_prompt_lists_each_chapter_quota(self):
+        block = pipeline._quota_block(self.chapters, self._quota())
+        for c in self.chapters:
+            self.assertIn(c['name'], block)
+        self.assertIn('不必均等', block)
+
+    def test_quota_block_is_empty_without_a_skeleton(self):
+        self.assertEqual('', pipeline._quota_block([], []))
+        self.assertEqual('', pipeline._quota_block(self.chapters, [1]))
+
+    def test_oneshot_prompt_carries_the_quota(self):
+        """短文档（一次调用）也得拿到页数分配信号，否则模型只会均分。"""
+        sk = dict(chapters=self.chapters)
+        doc = dict(blocks=[], source='夹具.md', title='夹具', structure=sk)
+        seen = {}
+
+        def fake(prompt, *a, **kw):
+            seen['prompt'] = prompt
+            return {}
+
+        with mock.patch.object(llm, 'ask_json', side_effect=fake):
+            pipeline._outline_oneshot(doc, '正文', 9, 12, object(), sk)
+        self.assertIn('01 开篇：1 页', seen['prompt'])
+        self.assertIn('02 主体：', seen['prompt'])
+
+
 class TestOutlineAssembly(unittest.TestCase):
 
     def test_toc_line_is_capped(self):
@@ -452,6 +503,44 @@ class TestOutlineSignal(unittest.TestCase):
         sk = structure.build_skeleton(self.BLOCKS, 'pdf', None)
         self.assertNotEqual(sk['method'], 'outline')
 
+    def test_placeholder_bookmark_is_not_a_chapter(self):
+        """`书签 1` 是 Acrobat 给没命名的书签自动起的名字，不是章节。
+
+        实测那份 Synology 白皮书的第一条书签就是它，落在一页没有标题的页上：
+        留着它，大纲会给它编一页正文、分隔页也照插一页，白吃两页预算。
+        它的标题块也不能漏下去当页单元 —— 那会变成一张标题叫「書籤 1」的页。
+        """
+        blocks = [_h('書籤 1', 1, 2),
+                  _h('Introduction', 1, 3), _p('正文若干字。' * 20, 3),
+                  _h('Architecture', 1, 4), _p('正文若干字。' * 20, 4),
+                  _h('Security', 1, 5), _p('正文若干字。' * 20, 5)]
+        outline = [dict(level=0, title='書籤 1', page=2),
+                   dict(level=0, title='Introduction', page=3),
+                   dict(level=0, title='Architecture', page=4),
+                   dict(level=0, title='Security', page=5)]
+        sk = structure.build_skeleton(blocks, 'pdf', outline)
+        self.assertEqual([c['name'] for c in sk['chapters']],
+                         ['01 Introduction', '02 Architecture', '03 Security'])
+        names = [p['name'] for c in sk['chapters'] for p in c['pages']]
+        self.assertNotIn('書籤 1', names)
+
+    def test_empty_chapter_is_dropped_and_the_rest_renumbered(self):
+        """两条书签落在同一页 → 头一条的区间宽度是 0，它是个空章。
+
+        空章要丢掉，**后面的章号要重排**：否则第一页分隔页上印的是「02」，
+        而整份 deck 里根本没有 01。
+        """
+        blocks = [_h('封面', 1, 1, role='cover'), _p('封面装饰。', 1),
+                  _h('Introduction', 1, 2), _p('正文若干字。' * 20, 2),
+                  _h('Architecture', 1, 3), _p('正文若干字。' * 20, 3)]
+        outline = [dict(level=0, title='概述', page=2),      # 与下一条同页
+                   dict(level=0, title='Introduction', page=2),
+                   dict(level=0, title='Architecture', page=3)]
+        sk = structure.build_skeleton(blocks, 'pdf', outline)
+        self.assertEqual([c['name'] for c in sk['chapters']],
+                         ['01 Introduction', '02 Architecture'])
+        self.assertEqual([len(c['pages']) for c in sk['chapters']], [1, 1])
+
 
 class TestSignalRanking(unittest.TestCase):
     """认得出来的信号谁压谁。"""
@@ -548,7 +637,8 @@ class TestChapterSegmentation(unittest.TestCase):
             doc = self._doc(20)
             sk = self._run(doc, bad)
             self.assertEqual(sk['method'], 'even_split')
-            self.assertEqual(len(sk['chapters']), pipeline._chapter_cap(15))
+            # 均分几章由页数预算推（15 页上限 → 5 章），不是老早那个写死的 6
+            self.assertEqual(len(sk['chapters']), pipeline._segment_target(15))
             self.assertEqual(sum(len(c['pages']) for c in sk['chapters']), 20)
 
     def test_llm_failure_still_keeps_every_page(self):
@@ -590,6 +680,32 @@ class TestChapterSegmentation(unittest.TestCase):
             pipeline._maybe_segment(doc, 15, object(), lambda m: None)
         self.assertFalse(m.called)
         self.assertEqual(len(doc['structure']['chapters']), 20)
+
+    def test_segment_target_follows_the_page_budget(self):
+        """目标章数按页数预算推（一章 = 一页分隔 + 两页正文）。
+
+        早先这里是写死的 `min(cap, 6)`，而模型**每次都取上限**：不管什么文档
+        都分成 6 章——散架的 104 章和规规矩矩的 15 章，出口一模一样。
+        """
+        self.assertEqual(4, pipeline._segment_target(12))
+        self.assertEqual(5, pipeline._segment_target(15))
+        self.assertEqual(6, pipeline._segment_target(18))
+        self.assertEqual(2, pipeline._segment_target(4))        # 下限兜到 2 章
+
+    def test_segmentation_prompt_asks_for_the_budget_derived_count(self):
+        doc = self._doc(20)
+        prompts = []
+
+        def fake(prompt, *a, **kw):
+            prompts.append(prompt)
+            return {'chapters': [{'name': '开篇', 'from': 1, 'to': 10},
+                                 {'name': '收尾', 'from': 11, 'to': 20}]}
+
+        with mock.patch.object(llm, 'ask_json', side_effect=fake):
+            pipeline._maybe_segment(doc, 12, object(), lambda m: None)
+        self.assertTrue(prompts)
+        self.assertIn('归成 3–4 章', prompts[0])          # 12 页上限 → 最多 4 章
+        self.assertIn('宁少勿多', prompts[0])
 
     def test_segmentation_runs_before_the_divider_budget(self):
         """顺序是有讲究的：章节数决定分隔页占多少页预算。"""

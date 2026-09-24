@@ -275,13 +275,26 @@ class TestPlanStage(unittest.TestCase):
 
     def test_dividers_only_when_budget_allows(self):
         """分隔页要占页数预算，装不下就完全不插（而不是砍正文）。"""
+        # 2 章 / 10 页上限：插得下分隔页，正文区间同步下移（宽度不变）
         n, lo, hi = pipeline._divider_budget(self.doc, 6, 10)
-        self.assertEqual((2, 6, 8), (n, lo, hi))
-        # 预算太紧（hi < 章数 × 2）→ 一页都不插
+        self.assertEqual((2, 4, 8), (n, lo, hi))
+        # 预算太紧（每章摊不到「一页分隔 + 两页正文」）→ 一页都不插
         self.assertEqual(0, pipeline._divider_budget(self.doc, 2, 3)[0])
         # 开关关掉 → 一页都不插
         with mock.patch.object(config, 'section_dividers', lambda: False):
             self.assertEqual(0, pipeline._divider_budget(self.doc, 6, 12)[0])
+
+    def test_dividers_yield_when_they_would_eat_the_content(self):
+        """分隔页只在正文撑得住时插。
+
+        6 章 / 12 页是那条老判据（`hi >= 章数 × 2`）刚好踩线通过的样子：
+        6 页分隔 + 6 页正文 —— 每章恰好一页，无论上传什么文档都是同一副骨架。
+        """
+        six = dict(structure={'chapters': [{}] * 6})
+        self.assertEqual(0, pipeline._divider_budget(six, 9, 12)[0])
+        # 4 章 / 12 页就还留得下：4 页分隔 + 8 页正文
+        four = dict(structure={'chapters': [{}] * 4})
+        self.assertEqual((4, 5, 8), pipeline._divider_budget(four, 9, 12))
 
     def test_dividers_inserted_at_each_chapter_head(self):
         out = self._outline()
