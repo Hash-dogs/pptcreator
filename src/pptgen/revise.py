@@ -1185,7 +1185,7 @@ def redo_slide(deck: dict, preview: int, outline: dict, doc: dict, request: str,
         used[sl.get('layout')] = used.get(sl.get('layout'), 0) + 1
     payload = dict(section=section, title=page.get('title') or '',
                    hint=page.get('hint') or '', intent=intent,
-                   source=page.get('source') or '', anchor=page.get('anchor') or '',
+                   anchor=page.get('anchor') or '',
                    candidates=cands)
     notes = (
         '这一页要**整页重做**，按用户的要求重新组织内容与版式。\n'

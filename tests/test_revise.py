@@ -28,8 +28,7 @@ def _deck(n_slides, *, dividers_at=(), title='一份 deck', toc=None, **extra):
         else:
             slides.append(dict(layout='numbered_columns', title='页标题 %d' % (i + 1),
                                kicker='01 初识 Dify', columns=3,
-                               items=[dict(name='名', desc='说明')],
-                               source='Source: 《x》§1'))
+                               items=[dict(name='名', desc='说明')]))
     d = dict(slides=slides, toc=toc if toc is not None else ['01 初识 Dify'], title=title)
     d.update(extra)
     return d
@@ -314,7 +313,7 @@ class TestPathsOf(unittest.TestCase):
 
     def setUp(self):
         self.cols = dict(layout='numbered_columns', title='页标题', kicker='01 甲章',
-                         columns=3, source='Source: 《x》§1',
+                         columns=3,
                          items=[dict(name='名一', desc='说明一'),
                                 dict(name='名二', desc='说明二')])
         self.stmt = dict(layout='statement', kicker='01 甲章',

@@ -12,7 +12,7 @@
 
 **坐标是英寸，且已经归一到版心**（`normalize_blocks` 负责把识别结果从
 「图片里的大致比例」换算成这个坐标系）。区块不允许越出：
-左 `LEFT`、右 `RIGHT`（12.00"）、上 `Y_CONTENT`（2.00"）、下 `Y_BOTTOM`（6.60"）。
+左 `LEFT`、右 `RIGHT`（12.00"）、上 `Y_CONTENT`（2.00"）、下 `Y_BOTTOM`（6.95"）。
 
 ## 三条设计决定，都是有理由的
 
@@ -263,8 +263,8 @@ def _render_kpi(s, b, spec):
         note = _str(it.get('note'))
         if note:
             put(s, cx, cy + 1.22, cw, 0.34,
-                [[(_one_line(note, cw, FS['source']),
-                   dict(size=FS['source'], color=b.get('note_color', 'RED')))]])
+                [[(_one_line(note, cw, FS['foot']),
+                   dict(size=FS['foot'], color=b.get('note_color', 'RED')))]])
         if row < nrow - 1 and b.get('row_rule', True):
             hrule(s, x, cy + rh - 0.18, w)
 
@@ -400,7 +400,7 @@ _RENDERERS['band'] = _render_band
 def render_blocks(slide, spec):
     """声明式渲染器的入口：与 19 套内置版式的渲染函数**同签名**。
 
-    页眉页脚由这里统一画（自定义版式不再各自操心 kicker/title/source），
+    页眉页脚由这里统一画（自定义版式不再各自操心 kicker/title/页码），
     区块只负责正文带。
 
     **区块从哪儿来**：优先用 `spec['blocks']`（临时的试片渲染走这条路 —— 那时版式
@@ -417,7 +417,7 @@ def render_blocks(slide, spec):
             continue
         if kind in ('rule', 'band') or b.get('field'):
             fn(slide, b, spec)
-    footer(slide, spec['page'], spec.get('source'))
+    footer(slide, spec['page'])
 
 
 # 已注册的声明：版式名 → 区块列表。加载自定义版式时填（见 layout_store）。
@@ -438,7 +438,7 @@ def decl_of(name: str) -> list[dict]:
 
 # 区块的框小于这个就丢掉：窄到 0.8" 以下放不下任何中文，留着只会变成一坨溢出。
 # 高度下限取 0.18" 而不是 0.30"：**一行文字本来就矮** —— 版式里的 kicker 框是
-# 0.28"、来源行是 0.30"（见 tokens.header/footer）。早先按 0.30" 卡，把识别出来的
+# 0.28"、页码行是 0.28"（见 tokens.header/footer）。早先按 0.30" 卡，把识别出来的
 # 0.28" 说明行当噪声丢了，那一轮因此不合格（实测）。0.18" 只杀真正的碎片。
 MIN_BOX_W, MIN_BOX_H = 0.80, 0.18
 # 贴边吸附的容差：识别出来的左边界差 0.2" 以内就算「贴着版心左边」
@@ -499,8 +499,14 @@ def normalize_blocks(raw, dropped=None):
         if w < MIN_BOX_W or h < min_h:
             _drop(dropped, b, '太窄或太矮（%.2f" × %.2f"）' % (w, h))
             continue
+        # 取整要**先取整再夹一次边界**：`x` 与 `w` 各自四舍五入之后，两者之和会
+        # 比裁剪时算的越过 0.01"（实测 `Y_BOTTOM` 从 6.60 改到 6.95 之后，
+        # 6.46 + 0.50 = 6.96 > 6.95 —— 裁剪那一刻是刚好贴边的）。
+        # 渲染层画的是取整后的值，所以越过的那一分是真越界。
+        x2, y2 = round(x, 2), round(y, 2)
         nb = dict(b)
-        nb.update(x=round(x, 2), y=round(y, 2), w=round(w, 2), h=round(h, 2))
+        nb.update(x=x2, y=y2, w=round(min(round(w, 2), RIGHT - x2), 2),
+                  h=round(min(round(h, 2), Y_BOTTOM - y2), 2))
         out.append(nb)
     return _fill_band(out)
 
@@ -669,7 +675,7 @@ def item_capacity(meta) -> int:
 
 
 def field_names(blocks):
-    """这份声明用到哪些 spec 字段（`title` / `kicker` / `source` 不算 —— 页眉页脚）。"""
+    """这份声明用到哪些 spec 字段（`title` / `kicker` / `page` 不算 —— 页眉页脚）。"""
     out = []
     for b in blocks or []:
         f = b.get('field')
@@ -716,7 +722,7 @@ def catalog_of(meta) -> str:
     if not lens:
         return '必填 title（一句话主张，≤24 字）、kicker（章节标签）。'
     return ('必填（按区块给出，缺字段的那一块留空）：\n' + '\n'.join(lens)
-            + '\n选填 kicker（章节标签）、source（来源标注）。')
+            + '\n选填 kicker（章节标签）。')
 
 
 def capacity_of(meta) -> str:

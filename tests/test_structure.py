@@ -119,7 +119,7 @@ def pptx_doc() -> dict:
     return parse.parse_bytes(make_pptx_bytes(), '夹具.pptx')
 
 
-def _slide_text(spec, skip=('layout', 'title', 'kicker', 'source', 'page')) -> str:
+def _slide_text(spec, skip=('layout', 'title', 'kicker', 'page')) -> str:
     """把一个 slide spec 里所有渲染出来的文字拼起来（用于断言「取到内容了」）。
 
     递归到底。早先只处理 str/list，条目里的 `{"name":…, "desc":…}` 直接掉在
@@ -311,8 +311,8 @@ class TestOutlineAssembly(unittest.TestCase):
         一片空白（`tokens.header()` 在两者都空时什么都不画）。
         """
         outline = dict(title='T', toc=[], sections=[dict(name='01 甲', summary='', pages=[
-            dict(title='页一', hint='', source='S1'),
-            dict(title='页二', hint='', source='S2'),
+            dict(title='页一', hint=''),
+            dict(title='页二', hint=''),
         ])])
         plan = pipeline._normalise_plan(
             [dict(layout='numbered_columns', items=[dict(name='a', desc='b')]),
@@ -321,7 +321,6 @@ class TestOutlineAssembly(unittest.TestCase):
         self.assertEqual(plan['slides'][0]['title'], '页一')
         self.assertEqual(plan['slides'][0]['kicker'], '01 甲')
         self.assertEqual(plan['slides'][1]['title'], '页二')
-        self.assertEqual(plan['slides'][1]['source'], 'S2')
 
     def test_normalise_plan_带回副标题(self):
         """封面副标题不在大纲生成提示词里，但**按页修订会写它**。

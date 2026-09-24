@@ -44,7 +44,7 @@ from . import layout_spec
 from .layout_spec import LayoutSpec
 from .tokens import (
     LEFT, RIGHT, W, FS, RED, DARK, MUTED, GREY, RULE, TINT, Y_BOTTOM,
-    EA, LAT, Y_CONTENT, Y_SOURCE,
+    EA, LAT, Y_CONTENT,
     put, hrule, vrule, dot, outline_box, tint_band, table, paras, runs,
     header, footer, fit_one_line, fit_block, text_w_in,
 )
@@ -114,7 +114,7 @@ def _flat(lines) -> str:
         reuse_friendly=True,
         catalog='''适用于**章节隔断页**（每章第一页）。
    必填 num（章节号，≤2 字符，如 "03"）、title（章节名，≤14 字）
-   选填 lead（一句导语，≤40 字）、source
+   选填 lead（一句导语，≤40 字）
    ⚠️ 这是结构页：**不要放正文、不要放列表**。它的作用是让读者看见「换章了」。''',
         capacity='num ≤2 字符；title ≤14 字（40pt 一行放得下约 14 字，'
                  '源章名带着副题时压成短语，完整说法交给本页的 lead）；'
@@ -148,7 +148,7 @@ def render_section_divider(s, spec):
     if spec.get('lead'):
         put(s, LEFT, 5.05, 9.60, 0.80,
             [[(spec['lead'], dict(size=15, color=MUTED))]], ls=1.40)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -162,7 +162,7 @@ def render_section_divider(s, spec):
         reuse_friendly=True,
         catalog='''大字陈述。适合开篇、章节引言、一句话主张。
    必填 lines: [[(文本,{})], ...] 每行一段；关键词用 {"hl":true} 着强调色。
-   选填 body: [段落...]（最多 3 段、每段 ≤60 字）、source
+   选填 body: [段落...]（最多 3 段、每段 ≤60 字）
    ⚠️ 没有标题位 —— 陈述本身就是标题，别给 title。''',
         capacity='lines 每行 ≤22 字，最多 2 行；body 最多 3 段、每段 ≤60 字。')
 def render_statement(s, spec):
@@ -178,7 +178,7 @@ def render_statement(s, spec):
     y = spec.get('body_y', 5.05)
     if spec.get('body'):
         put(s, LEFT, y, 10.6, 1.7, paras(spec['body']), ls=1.45)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -202,7 +202,6 @@ def render_statement(s, spec):
    选填 claim: [段落...]（≤3 段、每段 ≤40 字）
         stats: [{"num":"38 家","label":"说明"}]，**2–3 个**，
                num 同为短数字（≤8 字符），label ≤20 字
-        source
    ⚠️ 有 4 个以上指标就别用这套（stats 只装得下 3 个），改用 kpi_grid。''',
         capacity='hero.num ≤8 字符；claim 最多 3 段、每段 ≤40 字；'
                  'stats 最多 3 条，每条 label ≤20 字、num ≤8 字符。')
@@ -234,7 +233,7 @@ def render_stat_hero(s, spec):
                    dict(size=30, color=DARK, bold=True))]])
             put(s, x, 5.56, cw - 0.45, 0.9,
                 [[(st['label'], dict(size=FS['small'], color=MUTED))]], ls=1.3)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -253,7 +252,7 @@ def render_stat_hero(s, spec):
    必填 items: [{"num":"38","unit":"%","label":"渗透率","note":"同比 +6pt"}]
      · num 是**短数字**（≤6 字符），unit 是单位（≤4 字符，可省）
      · label 是指标名（≤10 字），note 是补充口径（≤16 字，可省）
-   选填 columns（默认 3，可选 2 或 3）、source
+   选填 columns（默认 3，可选 2 或 3）
    ⚠️ 想要「一个数字压倒一切」就用 stat_hero；这套是**多个指标同等重要**。''',
         capacity='items 3–6 条；每条 num ≤6 字符、unit ≤4 字符、'
                  'label ≤10 字、note ≤16 字。超出就删掉 note。')
@@ -286,11 +285,11 @@ def render_kpi_grid(s, spec):
                dict(size=14, color=DARK, bold=True))]])
         if it.get('note'):
             put(s, x, y + 1.20, cw, 0.34,
-                [[(_fit(it['note'], cw, FS['source']),
-                   dict(size=FS['source'], color=RED))]])
+                [[(_fit(it['note'], cw, FS['foot']),
+                   dict(size=FS['foot'], color=RED))]])
         if row < nrow - 1:
             hrule(s, LEFT, y + rh - 0.18, W)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -307,7 +306,7 @@ def render_kpi_grid(s, spec):
         catalog='''术语定义。适合解释一个概念/名词。
    必填 term（词条，≤10 字）、formula（如 "= Define + Modify"，≤26 字符）
    选填 lead（一句加粗断言，≤24 字）、body（≤110 字）、
-        aside: [(文本,{})]（≤30 字）、source''',
+        aside: [(文本,{})]（≤30 字）''',
         capacity='term ≤10 字；formula ≤26 字符；lead ≤24 字；'
                  'body ≤110 字；aside ≤30 字。')
 def render_definition(s, spec):
@@ -329,7 +328,7 @@ def render_definition(s, spec):
         put(s, LEFT, 4.62, 11.0, 1.55, body, ls=1.45)
     if spec.get('aside'):
         put(s, LEFT, 6.28, 11.0, 0.35, paras(spec['aside']))
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -347,7 +346,7 @@ def render_definition(s, spec):
         reuse_friendly=True,
         catalog='''分栏编号列表。适合并列的若干要点。
    必填 items: [{"name":"关键词（≤8 字）","desc":"一句说明（≤22 字）"}]
-   选填 columns（默认 3）、source''',
+   选填 columns（默认 3）''',
         capacity='items 4–9 条；每条 name ≤8 字、desc ≤22 字。')
 def render_numbered_columns(s, spec):
     """分栏编号列表。可按 group 插入分组小标题。"""
@@ -366,7 +365,7 @@ def render_numbered_columns(s, spec):
               ('   ' + it['name'], dict(size=16, color=DARK, bold=True))]])
         put(s, x, y + 0.42, cw, 1.0,
             [[(it['desc'], dict(size=FS['small'], color=MUTED))]], ls=1.35)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -381,8 +380,7 @@ def render_numbered_columns(s, spec):
         fallback=('numbered_columns', 'split_main_aside'),
         reuse_friendly=True,
         catalog='''通栏浅色带，2–4 条。适合场景分类、并列陈述。
-   必填 bands: [{"name":"名称（≤10 字）","desc":"一到两句说明（≤52 字）"}]
-   选填 source''',
+   必填 bands: [{"name":"名称（≤10 字）","desc":"一到两句说明（≤52 字）"}''',
         capacity='bands 2–4 条；每条 name ≤10 字、desc ≤52 字。')
 def render_tinted_bands(s, spec):
     """通栏浅色带：每条带 = 序号 + 名称 + 说明，左右出血。"""
@@ -399,7 +397,7 @@ def render_tinted_bands(s, spec):
         y = 2.15 + i * (bh + gap)
         tint_band(s, y, bh)
         # 序号框收到 0.68"，避免与名称框包围盒重叠；说明框高度绑定带高，
-        # 否则最后一条会压到来源行（实测重叠 0.21"）。
+        # 否则最后一条会压到下一条带（实测重叠 0.21"）。
         put(s, LEFT, y + 0.22, 0.68, 0.5,
             [[('%02d' % (i + 1), dict(size=24, color=RED, bold=True))]])
         put(s, LEFT + 0.80, y + 0.30, 2.6, 0.45,
@@ -407,7 +405,7 @@ def render_tinted_bands(s, spec):
                dict(size=FS['h3'], color=DARK, bold=True))]])
         put(s, LEFT + 3.55, y + 0.24, W - 3.85, bh - 0.30,
             [[(bd['desc'], dict(size=14, color=MUTED))]], ls=1.40)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -423,7 +421,6 @@ def render_tinted_bands(s, spec):
         reuse_friendly=True,
         catalog='''四象限，**正好 4 条**。适合四个并列维度/挑战。
    必填 items: [{"name":"≤10 字","desc":"≤46 字"}] × 4
-   选填 source
    ⚠️ 条数不是 4 就别用这套。''',
         capacity='items 正好 4 条；每条 name ≤10 字、desc ≤46 字。')
 def render_quadrant(s, spec):
@@ -443,7 +440,7 @@ def render_quadrant(s, spec):
                dict(size=FS['h2'], color=DARK, bold=True))]])
         put(s, x, y + 0.72, W / 2 - 0.55, 1.5,
             [[(it['desc'], dict(size=14, color=MUTED))]], ls=1.4)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -461,9 +458,7 @@ def render_quadrant(s, spec):
         reuse_friendly=True,
         catalog='''维度对照（A 列 / B 列），2–5 行。适合前后对比、优劣对比。
    必填 col_a、col_b（两个对比方的名字，各 ≤10 字）
-        rows: [{"dim":"维度（≤6 字）","a":"…（≤34 字）","b":"…（≤34 字）"}]
-   选填 source
-   ⚠️ 只有内容**确实是 A 与 B 的对照**时才用；三条并列要点不是对照。''',
+        rows: [{"dim":"维度（≤6 字）","a":"…（≤34 字）","b":"…（≤34 字）"}]''',
         capacity='rows 2–5 行；每行 dim ≤6 字、a 与 b 各 ≤34 字。')
 def render_comparison_rows(s, spec):
     """维度对照：维度 | A 列 | B 列，逐行发丝线分隔。"""
@@ -479,8 +474,9 @@ def render_comparison_rows(s, spec):
     # 实测被 officecli 与本项目几何检查同时抓到。按可用高度均分即可。
     y0 = 2.62
     n = max(len(spec['rows']), 1)
-    # 上界取到来源行之前，否则最后一行的框会压住来源行（实测重叠 0.09"）
-    rh = min(spec.get('row_h', 1.32), (Y_SOURCE - 0.10 - y0) / n)
+    # 行高上限就是正文下界：早先这里再往上收 0.10" 是给来源行让位（实测重叠 0.09"），
+    # 来源行删掉后那 0.10" 也跟着还回来了。
+    rh = min(spec.get('row_h', 1.32), (Y_BOTTOM - y0) / n)
     y = y0
     for row in spec['rows']:
         put(s, x1, y + 0.04, 2.3, 0.4,
@@ -489,7 +485,7 @@ def render_comparison_rows(s, spec):
         put(s, x3, y, cw, rh - 0.08, [[(row['b'], dict(size=14, color=DARK))]], ls=1.38)
         y += rh
         hrule(s, LEFT, y - 0.20, W)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -518,7 +514,7 @@ def render_comparison_rows(s, spec):
      aside_table: {"header":["列1","列2"], "rows":[["…","…"], ...]}  2–4 行
      aside_stats: [{"num":"50,186","label":"≤14 字"}]  2–4 条
      aside_points: ["一句要点", ...]  2–4 条
-   选填 aside_title（辅区小标题，≤10 字）、source''',
+   选填 aside_title（辅区小标题，≤10 字）''',
         capacity='主区 items 3–5 条，每条 name ≤10 字、desc ≤40 字；'
                  'aside_table 最多 4 行、单元格 ≤18 字；'
                  'aside_stats 最多 4 条、label ≤14 字；aside_points 最多 4 条、每条 ≤26 字。')
@@ -577,7 +573,7 @@ def render_split_main_aside(s, spec):
                 [[('·', dict(size=15, color=RED, bold=True))]])
             put(s, ax + 0.24, yy, aw - 0.24, 0.56,
                 [[(tx, dict(size=FS['small'], color=MUTED))]], ls=1.32)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -596,7 +592,7 @@ def render_split_main_aside(s, spec):
         catalog='''横向流程链，3–5 步。适合操作步骤、实施路径。
    必填 steps: [{"num":"01","name":"步骤名（≤7 字）",
                 "desc":"两行短句，用 \\n 分隔，每行 ≤7 字"}]
-   选填 note: [(文本,{})]（≤40 字）、source''',
+   选填 note: [(文本,{})]（≤40 字）''',
         capacity='steps 3–5 步；每步 name ≤7 字、desc 两行每行 ≤7 字；note ≤40 字。')
 def render_process_chain(s, spec):
     """横向流程链：序号 + 标记点落在发丝线上 + 名称 + 说明。"""
@@ -626,7 +622,7 @@ def render_process_chain(s, spec):
         flat = ''.join(t for p in paras([spec['note']]) for t, _ in p)
         put(s, LEFT, 5.95, W, 0.78,
             [[(_fit(flat, W, 15, lines=2), dict(size=15, color=MUTED))]], ls=1.42)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -649,7 +645,6 @@ def render_process_chain(s, spec):
    必填 phases: [{"name":"阶段名（≤6 字）","nodes":["节点标签", ...]}]
      · 2–4 个阶段，每组 1–4 个节点，总节点 4–12 个
      · 节点标签 ≤20 字（框宽，可折两行；超过会被截断）
-   选填 source
    ⚠️ 节点多、标签长时**优先用这套**：它是本套版式里唯一能让节点框折两行、
       容下长标签的构图（框宽 3.09"、折两行约 34 字）。''',
         capacity='2–4 个阶段、每组 1–4 个节点、总节点 ≤12；'
@@ -673,7 +668,7 @@ def render_phase_grouped_flow(s, spec):
             [[(_fit(ph['name'], lab_w, FS['h3']),
                dict(size=FS['h3'], color=DARK, bold=True))]])
         put(s, LEFT, y + 0.50, lab_w, 0.30,
-            [[('%02d' % (r + 1), dict(size=FS['source'], color=RED, bold=True))]])
+            [[('%02d' % (r + 1), dict(size=FS['foot'], color=RED, bold=True))]])
         k = max(len(nodes), 1)
         bw = (avail - (k - 1) * gap) / k
         bh = min(0.86, rh - 0.34)
@@ -698,7 +693,7 @@ def render_phase_grouped_flow(s, spec):
             el = rPr.makeelement(qn('a:ea'), {})
             el.set('typeface', EA)
             rPr.append(el)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -718,8 +713,7 @@ def render_phase_grouped_flow(s, spec):
         reuse_friendly=True,
         catalog='''纵向时间线，5–8 步。轴线居中，奇数步靠左、偶数步靠右。
    适合步骤较多、每条一句话、有时间推进感的场景。
-   必填 steps: [{"name":"步骤名（≤8 字）","desc":"一句说明（≤22 字）"}]
-   选填 source''',
+   必填 steps: [{"name":"步骤名（≤8 字）","desc":"一句说明（≤22 字）"}]''',
         capacity='steps 5–8 条；每条 name ≤8 字、desc ≤22 字（单行硬上限 28 字，'
                  'name+desc 合计 ≤36 字）。')
 def render_timeline_vertical(s, spec):
@@ -738,7 +732,9 @@ def render_timeline_vertical(s, spec):
     half = cx - gap - LEFT          # 5.245 —— 左框 x=LEFT、右框 x=cx+gap，右边界正好 12.00
     h_box = 0.56                    # 两行的框高。**下限 0.522**（几何⑤ need 39.76pt
                                     #   ÷ (72×1.06)）—— 调小必报 text_overflow。
-    y_top, y_bot = 2.10, 6.64       # 末项底 6.64，距来源行 6.78 留 0.14"
+    # 末项底收到正文下界之上 0.10"：早先这里只到 6.64（给来源行让位），
+    # 来源行删掉后步距跟着放宽（步距有 0.95" 上限，少步数时仍按上限收）。
+    y_top, y_bot = 2.10, Y_BOTTOM - 0.10
     span = y_bot - y_top - h_box    # 3.98
     ystep = min(0.95, span / max(n - 1, 1))
     y0 = y_top + (span - ystep * (n - 1)) / 2.0
@@ -780,7 +776,7 @@ def render_timeline_vertical(s, spec):
             hrule(s, cx - gap + 0.02, conn_y, 0.345)
         else:
             hrule(s, cx + 0.055, conn_y, 0.345)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -800,7 +796,7 @@ def render_timeline_vertical(s, spec):
         catalog='''分层架构：**3–5 层**，每层内部有 2–4 个并列模块。
    必填 layers: [{"name":"层名（≤8 字）","modules":["模块1","模块2","模块3"]}]
      · 数组顺序 = **自上而下**；每层 2–4 个模块，模块名 ≤16 字
-   选填 note（≤45 字）、source
+   选填 note（≤45 字）
    ⚠️ 与 tinted_bands 的区别：那是几条彼此独立的横带，**这套每层内部有并列模块**
       （二维结构）。技术栈、数据仓库分层、中台架构用这套。''',
         capacity='layers 3–5 层；每层 2–4 个模块；层名 ≤8 字；模块名 ≤16 字；note ≤45 字。')
@@ -851,7 +847,7 @@ def render_layered_stack(s, spec):
         flat = _flat([spec['note']])
         put(s, LEFT, 6.05, W, 0.50,
             [[(_fit(flat, W, 14), dict(size=14, color=MUTED))]])
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -870,7 +866,7 @@ def render_layered_stack(s, spec):
         reuse_friendly=True,
         catalog='''原生表格。适合参数对比、版本对比、类型矩阵。
    必填 header: ["列1","列2"]（2–5 列）、rows: [[...], ...]（2–8 行）
-   选填 col_widths（英寸，需合计 11.33）、source
+   选填 col_widths（英寸，需合计 11.33）
    ⚠️ 单元格 ≤22 字。要看**趋势/占比**就用 metric_trend，别用表格。''',
         capacity='rows 2–8 行 × 2–5 列；单元格 ≤22 字。')
 def render_data_table(s, spec):
@@ -882,7 +878,7 @@ def render_data_table(s, spec):
           font=spec.get('font', 13.5),
           header_h=spec.get('header_h', 0.52),
           row_h=spec.get('row_h'))
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -903,7 +899,7 @@ def render_data_table(s, spec):
      · **values 的个数必须与 labels 相同**；pie 只用第一个 series
      · ⚠️ 数值必须**原样来自源文档**，不得推算、不得编造。
        源文没有成序列的数字时，改用 data_table 或 kpi_grid。
-   选填 takeaways: [(文本,{})]（≤3 条，每条 ≤34 字）、source''',
+   选填 takeaways: [(文本,{})]（≤3 条，每条 ≤34 字）''',
         capacity='chart.labels 3–8 个；series 最多 2 组且长度与 labels 一致；'
                  'takeaways 最多 3 条、每条 ≤34 字。')
 def render_metric_trend(s, spec):
@@ -937,7 +933,7 @@ def render_metric_trend(s, spec):
                                 Inches(cw), Inches(chh), cd)
         chart = gf.chart
         chart.has_title = False
-        chart.font.size = Pt(FS['source'])        # 图表文字同样受 12pt 下限约束
+        chart.font.size = Pt(FS['foot'])        # 图表文字同样受 12pt 下限约束
         chart.font.name = LAT
         chart.font.color.rgb = MUTED
         chart.has_legend = len(series) > 1 and ctype != XL_CHART_TYPE.PIE
@@ -967,7 +963,7 @@ def render_metric_trend(s, spec):
                 [[('—', dict(size=14, color=RED, bold=True))]])
             put(s, tx + 0.28, yy, tw - 0.28, 1.25,
                 paras([para]), ls=1.38)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -998,7 +994,7 @@ _STATUS = {
                 "status":"done|doing|risk|todo"}]
      · status 四选一：done=已完成、doing=进行中、risk=有风险、todo=待启动
      · 4–8 条
-   选填 progress（进度列标题，如 "进度"）、source
+   选填 progress（进度列标题，如 "进度"）
    ⚠️ 这套版式专治「已完成/进行中/风险」这类状态语义 —— 没有状态就别用。''',
         capacity='items 4–8 条；每条 name ≤12 字、desc ≤34 字；progress ≤6 字。')
 def render_progress_checklist(s, spec):
@@ -1009,7 +1005,7 @@ def render_progress_checklist(s, spec):
     hdr_y = 2.10
     if spec.get('progress'):
         put(s, 10.55, hdr_y, 1.45, 0.30,
-            [[(spec['progress'], dict(size=FS['source'], color=MUTED, bold=True))]],
+            [[(spec['progress'], dict(size=FS['foot'], color=MUTED, bold=True))]],
             align=PP_ALIGN.RIGHT)
         hrule(s, LEFT, hdr_y + 0.32, W)
         hdr_y += 0.02
@@ -1024,7 +1020,7 @@ def render_progress_checklist(s, spec):
         # 且两框包围盒重叠 0.57×0.29" —— 两条都会被几何检查抓到。
         put(s, LEFT, y, 1.42, 0.30,
             [[('■ ', dict(size=12, color=col, bold=True)),
-              (label, dict(size=FS['source'], color=col, bold=True))]])
+              (label, dict(size=FS['foot'], color=col, bold=True))]])
         put(s, LEFT + 1.50, y - 0.02, 3.60, 0.34,
             [[(_fit(it['name'], 3.60, 15),
                dict(size=15, color=DARK, bold=True))]])
@@ -1038,7 +1034,7 @@ def render_progress_checklist(s, spec):
                 align=PP_ALIGN.RIGHT)
         y += rh
         hrule(s, LEFT, y - 0.16, W)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1056,7 +1052,6 @@ def render_progress_checklist(s, spec):
         reuse_friendly=False,
         catalog='''结论先行：上方一句总纲，下面 3–5 条**完整句子**的结论。
    必填 thesis（总纲，≤30 字）、points: [{"num":"01","text":"一条能直接念出来的结论（≤60 字）"}]
-   选填 source
    ⚠️ points 里是**句子**不是关键词 —— 与 numbered_columns 的区别就在这里。
       适合章节小结、汇报收尾。''',
         capacity='thesis ≤30 字；points 3–5 条、每条 ≤60 字。')
@@ -1080,7 +1075,7 @@ def render_executive_summary(s, spec):
                dict(size=20, color=RED, bold=True))]])
         put(s, LEFT + 0.78, y, W - 0.78, rh - 0.10,
             [[(pt['text'], dict(size=16, color=DARK))]], ls=1.38)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1094,7 +1089,7 @@ def render_executive_summary(s, spec):
         reuse_friendly=False,
         catalog='''引语页。适合结语、核心观点。一页只讲一件事。
    必填 quote: [[(文本,{})], ...]（每行 ≤20 字，最多 2 行）
-   选填 attribution（≤30 字）、body: [段落...]（≤3 段、每段 ≤40 字）、source''',
+   选填 attribution（≤30 字）、body: [段落...]（≤3 段、每段 ≤40 字）''',
         capacity='quote 每行 ≤20 字，最多 2 行；attribution ≤30 字；'
                  'body 最多 3 段、每段 ≤40 字。')
 def render_quote(s, spec):
@@ -1108,7 +1103,7 @@ def render_quote(s, spec):
     hrule(s, LEFT, 4.92, W)
     if spec.get('body'):
         put(s, LEFT, 5.20, 11.0, 1.5, paras(spec['body']), ls=1.45)
-    footer(s, spec['page'], spec.get('source'))
+    footer(s, spec['page'])
 
 
 # ══════════════════════════════════════════════════════════════

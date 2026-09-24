@@ -30,13 +30,12 @@ W = RIGHT - LEFT                   # 11.33
 Y_KICKER = 0.38
 Y_TITLE = 0.68
 Y_CONTENT = 2.00
-Y_CONTENT_BOTTOM = 6.95
-Y_SOURCE = 6.78
 Y_PAGENUM = 7.18
-# **正文的实际下界**，比 `Y_CONTENT_BOTTOM` 更保守：留到 6.60 而不是 6.95 ——
-# 来源行在 6.78，内容压过它会被几何检查的 text_overlap 抓到
-# （`comparison_rows` 早先就是这么撞上的）。19 套内置版式与声明式版式共用这一个。
-Y_BOTTOM = 6.60
+# **正文的实际下界**。页脚只剩一个页码（在 7.18"），正文收到 6.95" 为止 ——
+# 留 0.23" 呼吸位，压过去会被几何检查的 text_overlap 抓到。
+# 早先这里收到 6.60"，让位给 6.78" 那行来源标注；那行删掉之后把空间还给了正文。
+# 19 套内置版式与声明式版式共用这一个。
+Y_BOTTOM = 6.95
 
 # ── 品牌色（取自模板 theme1.xml 的 clrScheme）─────────────────
 RED   = RGBColor(0xD3, 0x12, 0x45)   # accent1 —— 强调，只打在单一焦点上
@@ -57,7 +56,8 @@ EA, LAT = '微软雅黑', 'Segoe UI'
 # 模板自己的展示字体：封面标题（Helvetica Light 那一档）与目录页标题都用它。
 # 品牌页保持品牌的字重，正文页才用上面那对。
 EA_LIGHT = '微软雅黑 Light'
-FS = dict(kicker=12, title=26, h2=18, h3=17, body=16, small=13, source=12, min=12)
+# `foot` 是页脚与各种脚注小字的字号，同时也是全页字号下限（模板要求 ≥12pt）
+FS = dict(kicker=12, title=26, h2=18, h3=17, body=16, small=13, foot=12, min=12)
 
 # 公司骨架页在模板里的 layout 名（封面/目录页不靠 layout 名定位，靠占位符 idx）
 LAYOUT_BLANK = 'Blank'
@@ -405,7 +405,7 @@ def _cut(text, max_in, pt, lines=1):
 def fit_one_line(text: str, max_in: float, size_pt: float, lines: int = 1) -> str:
     """把文本裁到 `lines` 行内放得下（超出加省略号）。
 
-    有些框的高度只够固定行数（来源行 0.30" 只够 1 行；脚注 0.60" 够 2 行），
+    有些框的高度只够固定行数（页码行 0.28" 只够 1 行；脚注 0.60" 够 2 行），
     模型一旦写长就会折行溢出。几何检查只能报「装不下」，修复回环又可能因为
     「不得改动数字」而改不动 —— 这类**确定性**超标由程序截断最可靠。
     """
@@ -556,14 +556,16 @@ def fit_block(text: str, avail_in: float, avail_h: float, *, sizes,
     return lines, size
 
 
-def footer(slide, page_no, source=None):
-    if source:
-        # 来源行框高仅 0.30"，必须单行放下 —— 超长直接截断
-        src = fit_one_line(str(source), W - 1.4, FS['source'])
-        put(slide, LEFT, Y_SOURCE, W - 1.4, 0.30,
-            [[(src, dict(size=FS['source'], color=MUTED))]])
+def footer(slide, page_no):
+    """页脚：右下角一个页码。
+
+    早先左下角还有一行来源标注（每个版式的 spec 里带 `source`）。它占着 0.30"
+    的版面，而每一页都写「Source: 《某文档》§x.y」在成品里是纯噪声 ——
+    同一个来源会在十几页里重复十几遍。整条链路（模型 prompt / 大纲字段 /
+    校验 / 回填）已一并删掉，腾出的纵向空间还给了正文（见 `Y_BOTTOM`）。
+    """
     # 页码框宽度取 1.10 而不是照抄模板占位符的 2.51 —— 模板那个右边界是 13.34"，
     # 已经越出 13.33" 画布，且右对齐后数字会落进装饰弧线区。
     put(slide, 10.83, Y_PAGENUM, 1.10, 0.28,
-        [[(str(page_no), dict(size=FS['source'], color=MUTED))]],
+        [[(str(page_no), dict(size=FS['foot'], color=MUTED))]],
         align=PP_ALIGN.RIGHT)

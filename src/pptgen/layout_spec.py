@@ -359,7 +359,6 @@ def catalog_text() -> str:
          '  title  —— 本页标题，一句话主张，≤24 字。statement / quote / '
          'section_divider 没有标题位，不用给。',
          '  kicker —— 左上角小字章节标签，填所属章节名（如「03 Dify 能做什么」）。',
-         '  source —— 页脚来源标注。',
          '',
          '可用版式（layout 字段填左边的名字）：', '']
     n = 0

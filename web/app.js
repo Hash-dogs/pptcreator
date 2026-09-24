@@ -412,8 +412,8 @@ function renderOutline(o) {
   box.innerHTML = sections.map((s, si) => {
     const pages = (s.pages || []).map((p, pi) => {
       n += 1;
-      // source 一直没在界面上露出过，而它正是「这页内容有据可依」的证据
-      const tip = [p.hint, p.source].filter(Boolean).join('\n');
+      // 形态标签会被 CSS 截断，完整的一句挂在 title 上
+      const tip = p.hint || '';
       return '<div class="page">'
         + '<span class="pageno">' + String(n).padStart(2, '0') + '</span>'
         + '<input data-si="' + si + '" data-pi="' + pi + '" value="' + esc(p.title) + '">'

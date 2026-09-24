@@ -33,7 +33,6 @@ DESIGN_RULES = """
 - 页面上的文字要**精炼**：正文段落每条不超过 60 字，列表项不超过 30 字。
   这是幻灯片，不是文档——把细节砍掉，留下最锋利的事实。
 - 数字、专有名词、结论句必须保留原文，不得改写或编造。
-- 每页都要给 source 字段（写来源标注，如 "Source: 《Dify 介绍与实战》§1.1"）。
 
 **版式只能从该页给出的候选里挑**（候选已经按这一页的表达意图与内容容量筛过）。
 候选里排在前面的更贴题。不要在候选之外自创版式名。
@@ -559,7 +558,7 @@ _HEAD_TAIL = """
     {"name": "01 章节名（≤14 字，会印在章节分隔页的大字上）",
       "summary": "一句话概括",
       "pages": [{"title": "页面标题（≤24 字）", "hint": "展示形态", "intent": "表达意图",
-                 "source": "来源标注", "anchor": "该页内容主要来自的源页标题"}]}
+                 "anchor": "该页内容主要来自的源页标题"}]}
   ]
 }
 """
@@ -837,11 +836,9 @@ def _outline_problems(data: dict, sk: dict, lo: int, hi: int) -> list[str]:
     if not pages:
         return problems
 
-    missing = [p.get('title') for p in pages
-               if not (p.get('hint') or '').strip() or not (p.get('source') or '').strip()]
+    missing = [p.get('title') for p in pages if not (p.get('hint') or '').strip()]
     if missing:
-        problems.append('%d 页缺 hint 或 source（例：%s）'
-                        % (len(missing), missing[0]))
+        problems.append('%d 页缺 hint（例：%s）' % (len(missing), missing[0]))
 
     # intent 是版式选择的输入：缺了就退化成按标题猜，选出来的版式自然不贴内容。
     bad_intent = [p.get('title') for p in pages
@@ -868,7 +865,7 @@ def _repair_outline(data: dict, sk: dict, lo: int, hi: int,
     """确定性地修能修的部分，剩下的记成 warning。
 
     模型不一定听话，但**不该因为不听话就整份退回兜底** —— 兜底产出更差。
-    所以先尽力修：补章节、补 hint/source、超页数就章内压页。
+    所以先尽力修：补章节、补 hint、超页数就章内压页。
     """
     warnings = list(problems)
     chapters = sk.get('chapters') or []
@@ -885,22 +882,20 @@ def _repair_outline(data: dict, sk: dict, lo: int, hi: int,
                 hit = sections[len(fixed)] if len(fixed) < len(sections) else None
             if hit is None:
                 hit = dict(name=c['name'], summary='',
-                           pages=[dict(title=p['name'], hint='', source='') for p in c['pages']])
+                           pages=[dict(title=p['name'], hint='') for p in c['pages']])
             hit = dict(hit)
             hit['name'] = c['name']
             fixed.append(hit)
         sections = fixed
         data['sections'] = sections
 
-    # ② 补 hint / source：按 anchor 找源页，找不到就按顺序取
+    # ② 补 hint / anchor：按 anchor 找源页，找不到就按顺序取
     for s, c in zip(sections, chapters or [None] * len(sections)):
         src_pages = {p['name']: p for p in (c or {}).get('pages', [])}
         spans = list(src_pages)
         for j, p in enumerate(s.get('pages') or []):
             if not (p.get('hint') or '').strip():
                 p['hint'] = ''
-            if not (p.get('source') or '').strip():
-                p['source'] = 'Source: 《%s》%s' % (data.get('title') or '', s.get('name', ''))
             if not (p.get('anchor') or '').strip() and spans:
                 p['anchor'] = spans[min(j, len(spans) - 1)]
             # intent 缺失会让版式选择退化成「按标题猜」，这里先按标题/形态补一个，
@@ -965,7 +960,7 @@ def _outline_oneshot(doc, src, lo, hi, cfg, sk, feedback=None) -> dict:
 - 每章至少 1 页；**页可以在章内合并，章节不可合并、不可丢弃**。
 {quota}- 每页给一个**具体的、有信息量的标题**，不要「概述」「简介」这类空标题。
 {_TITLE_RULE}- 每页标注最适合的展示形态 hint（如「对比表」「流程图」「三个并列要点」「一个核心数字」）。
-- 每页给 source（来源标注），并给 anchor：填它主要取材的那条源页**标题**
+- 每页给 anchor：填它主要取材的那条源页**标题**
   （上面每条 `-` 后面、全角空格之前的那一截），**只抄页名本身** ——
   不要带后面的首句，也不要带「（N 字）」。anchor 是取源素材的索引，多抄一个字就取不到了。
 - {_mode_hint()}
@@ -1009,13 +1004,13 @@ def _outline_chunked(doc, sk, lo, hi, cfg) -> dict:
 - 为本章设计 **{k} 页**，顺序与原文一致。
 - 页可以在章内合并，但不要跨章取材。
 - 每页给一个具体的、有信息量的标题，不要「概述」「简介」这类空标题。
-{_TITLE_RULE}- 每页标注展示形态 hint、来源 source，以及 anchor：本章源页**标题**里最相关的那一条，
+{_TITLE_RULE}- 每页标注展示形态 hint，以及 anchor：本章源页**标题**里最相关的那一条，
   **只抄页名本身**（上面每条 `-` 后面、全角空格之前的那一截）—— 不要带首句，也不要带「（N 字）」。
 - 数字、专有名词、结论句必须原样保留。
 {_INTENT_BLOCK}
 只输出 JSON：
 {{"name": "{c['name']}", "summary": "本章一句话概括",
-  "pages": [{{"title": "…", "hint": "…", "intent": "…", "source": "…", "anchor": "…"}}]}}
+  "pages": [{{"title": "…", "hint": "…", "intent": "…", "anchor": "…"}}]}}
 """
         data = llm.ask_json(prompt, cfg, system=_SYSTEM,
                             max_tokens=config.outline_max_tokens())
@@ -1316,7 +1311,7 @@ def _plan_by_llm(outline: dict, doc: dict, src: str, cfg, log) -> dict:
         # 白名单少一个字段，规划模型就只能瞎猜取材范围。
         todo.append((i, {'section': sec, 'title': p['title'],
                          'hint': p.get('hint', ''), 'intent': intent,
-                         'source': p.get('source', ''), 'anchor': p.get('anchor', ''),
+                         'anchor': p.get('anchor', ''),
                          'candidates': cands},
                      dict(role=role, intent=intent, candidates=cands, page=p,
                           section=sec, summary=s.get('summary') or '',
@@ -1445,7 +1440,6 @@ def _plan_batch(chunk: list[dict], src: str, cfg, used: dict, total: int,
 - 严格按该版式的字段填写，不要自创字段。
 - **严格遵守该版式的容量上限**（目录里逐条写明了条数与字数）。
 - 内容必须来自源文档，不得编造数字或事实；图表的数据点必须是原文里有的。
-- 每页都要有 source 字段。
 {notes_txt}
 只输出 JSON：
 {{"slides": [ {{"layout": "…", ...该版式的字段…}}, ... ]}}
@@ -1601,8 +1595,7 @@ def _heuristic_slide(page: dict, section: str, blocks: list[dict], *,
     paras = [b['text'] for b in blocks if b['type'] == 'para']
     bullets = [i for b in blocks if b['type'] == 'bullets' for i in b['items']]
     tables = [b for b in blocks if b['type'] == 'table']
-    src = page.get('source') or ('Source: %s' % section)
-    base = dict(kicker=section, source=src)
+    base = dict(kicker=section)
     title = page.get('title') or section
     tbl = tables[0] if tables else None
 
@@ -1702,7 +1695,7 @@ def _heuristic_slide(page: dict, section: str, blocks: list[dict], *,
 
 
 def _fill_header(sl: dict, page: dict, section: str) -> dict:
-    """页眉三件套（`source` / `title` / `kicker`）的回填规则。
+    """页眉两件套（`title` / `kicker`）的回填规则。
 
     **规划收尾与按页修订共用这一份**。这个仓库里手写清单的漂移已经发生过三次
     （`layout_spec` 的目录/预算/容量曾经是三份清单，见 README），所以修订
@@ -1716,8 +1709,6 @@ def _fill_header(sl: dict, page: dict, section: str) -> dict:
     等于把同一个名字写两遍。
     """
     sl = dict(sl)
-    if not (sl.get('source') or '').strip():
-        sl['source'] = (page or {}).get('source') or ''
     if sl.get('layout') == 'statement':
         # statement 没有标题位（见 layouts.render_statement），留个 title 反而
         # 会被 repair 的 _text_len 算进去。这是原有行为，别改。

@@ -18,11 +18,8 @@
 会先红，图鉴跟着回归走，不会与版式漂移。
 """
 
-SRC = 'Source: 《Dify 介绍与实战》§1.1'
-
-
 def _kicker(t='01 初识 Dify'):
-    return dict(kicker=t, source=SRC)
+    return dict(kicker=t)
 
 
 FIXTURES = [
@@ -37,8 +34,7 @@ FIXTURES = [
         body=[[('Dify 是一个开源的大语言模型应用开发平台，'
                 '融合后端即服务与 LLMOps 的理念。', {'size': 16, 'color': 'MUTED'})],
               [('它把构建 LLM 应用所需的技术栈一次性备齐。',
-                {'size': 16, 'color': 'DARK', 'bold': True})]],
-        source=SRC)),
+                {'size': 16, 'color': 'DARK', 'bold': True})]])),
 
     ('stat_hero', dict(
         layout='stat_hero', title='Dify 的位置：一组数字',
@@ -238,8 +234,7 @@ FIXTURES = [
         body=[[('第一步', {'size': 16, 'color': 'DARK', 'bold': True}),
                ('  参照官方文档跑通构建流程。', {'size': 16, 'color': 'MUTED'})],
               [('第二步', {'size': 16, 'color': 'DARK', 'bold': True}),
-               ('  接入企业知识库，让回答有据可依。', {'size': 16, 'color': 'MUTED'})]],
-        source=SRC)),
+               ('  接入企业知识库，让回答有据可依。', {'size': 16, 'color': 'MUTED'})]])),
 ]
 
 

@@ -30,8 +30,7 @@ SLIDES = [
                'RAG 引擎、Agent 框架与灵活的工作流。', {'size': 16, 'color': 'MUTED'})],
              [('目标是成为一个让用户少写代码、少动手的智能化平台。',
                {'size': 16, 'color': 'DARK', 'bold': True})],
-         ],
-         source='Source: Dify 介绍与实战 · §1.1'),
+         ]),
 
     # ── 02 关键数字 ─────────────────────────────────────────
     dict(layout='stat_hero', kicker='转折点', title='Dify 的位置：一组数字',
@@ -45,8 +44,7 @@ SLIDES = [
              dict(num='60,000+', label='在 GPTs 发布前，就已在 Dify 创建了第一个应用'),
              dict(num='3 个', label='实战案例：聊天助手 / 企业知识库 / 工作流'),
              dict(num='14 种', label='知识库支持的文档格式，单文件不超过 15MB'),
-         ],
-         source='Source: star-history.com（2024-10-31）· Dify 介绍与实战'),
+         ]),
 
     # ── 03 什么是 Dify ──────────────────────────────────────
     dict(layout='definition', kicker='01 初识 Dify', title='什么是 Dify',
@@ -56,8 +54,7 @@ SLIDES = [
               '高质量的 RAG 引擎、稳健的 Agent 框架与灵活的工作流，同时提供易用的界面与 API，'
               '让开发者不必重复造轮子。',
          aside=[('社区对它的描述：', {'size': 13, 'color': 'MUTED'}),
-                ('简单、克制、快速迭代。', {'size': 13, 'color': 'DARK', 'bold': True})],
-         source='Source: Dify 介绍与实战 · §1.1 什么是 Dify'),
+                ('简单、克制、快速迭代。', {'size': 13, 'color': 'DARK', 'bold': True})]),
 
     # ── 04 设计初衷 ─────────────────────────────────────────
     dict(layout='comparison_rows', kicker='01 初识 Dify', title='设计初衷：把复杂流程留给平台',
@@ -71,8 +68,7 @@ SLIDES = [
                   b='模块化流程，自动完成建模与可视化'),
              dict(dim='结果输出', a='结果分散在多份文件里，需多步操作才能成报告',
                   b='提供多样化输出接口，自动生成报告'),
-         ],
-         source='Source: Dify 介绍与实战 · §1.1.2 设计初衷'),
+         ]),
 
     # ── 05 九个关键词 ───────────────────────────────────────
     dict(layout='numbered_columns', kicker='01 初识 Dify', title='核心理念：九个关键词',
@@ -87,8 +83,7 @@ SLIDES = [
              dict(name='可观测性', desc='LLMOps 监控日志与性能，据真实数据改进提示与模型'),
              dict(name='后端即服务', desc='所有功能均提供 API，轻松集成进现有业务逻辑'),
              dict(name='云服务与自托管', desc='既可使用云服务，也可部署在自己的环境中'),
-         ],
-         source='Source: Dify 介绍与实战 · §1.2 Dify 的核心理念'),
+         ]),
 
     # ── 06 四大挑战 ─────────────────────────────────────────
     dict(layout='quadrant', kicker='02 为什么选 Dify', title='AI 应用开发，难在哪？',
@@ -101,8 +96,7 @@ SLIDES = [
                   desc='既要保护隐私又要高效利用数据，同时防范对抗样本等针对 AI 系统本身的攻击。'),
              dict(name='持续更新与迭代',
                   desc='需要实时监测系统性能，并根据新数据与新需求持续调整，跟上快速演进的技术。'),
-         ],
-         source='Source: Dify 介绍与实战 · §2.1 人工智能应用开发的挑战'),
+         ]),
 
     # ── 07 价值·开发效率 ────────────────────────────────────
     dict(layout='comparison_rows', kicker='02 为什么选 Dify', title='价值（一）：开发效率',
@@ -117,8 +111,7 @@ SLIDES = [
              dict(dim='模块化组件',
                   a='工作流、RAG 管道、智能代理、模型管理等组件覆盖从原型到生产的全过程',
                   b='内容创作平台 —— 工作流抓取新闻、RAG 精简排序、文本生成产出摘要'),
-         ],
-         source='Source: Dify 介绍与实战 · §2.2.1–2.2.3'),
+         ]),
 
     # ── 08 价值·生产与生态 ──────────────────────────────────
     dict(layout='tinted_bands', kicker='02 为什么选 Dify', title='价值（二）：生产就绪与生态',
@@ -132,8 +125,7 @@ SLIDES = [
                   desc='AI 的变化被隔离在业务层之外，业务开发者只需关注自己的领域。'),
              dict(name='快速迭代与创新',
                   desc='Workflow 让 AI 工作流可视化，像搭积木一样构建复杂流程。'),
-         ],
-         source='Source: Dify 介绍与实战 · §2.2.4–2.2.7'),
+         ]),
 
     # ── 09 三类应用场景 ─────────────────────────────────────
     dict(layout='tinted_bands', kicker='03 Dify 能做什么', title='三类典型应用场景',
@@ -142,8 +134,7 @@ SLIDES = [
              dict(name='创业团队', desc='用 Dify 构建 MVP 拿到投资，或通过 POC 赢得客户订单；低代码特性大幅缩短从创意到产品的周期。'),
              dict(name='现有业务', desc='通过 RESTful API 把 AI 能力接入现有业务，实现 Prompt 与业务代码解耦，并在管理界面追踪数据、成本与用量。'),
              dict(name='大型企业', desc='作为企业内部 LLM 网关部署，加速生成式 AI 普及，并实现集中治理与统一监管。'),
-         ],
-         source='Source: Dify 介绍与实战 · §3.1 应用场景概览'),
+         ]),
 
     # ── 10 四大应用类型 ─────────────────────────────────────
     dict(layout='data_table', kicker='03 Dify 能做什么', title='四大应用类型与代表案例',
@@ -154,8 +145,7 @@ SLIDES = [
              ['对话型', '多轮对话，具备对话记忆、AI 开场白与上下文理解', '智能客服、教育辅导', 'Ada、Duolingo Max'],
              ['Agent 智能助手', '配置搜索、计算、绘图等工具，自主完成任务分解与推理', '财务分析、报告撰写', 'AgentGPT、AutoGPT'],
              ['工作流应用', 'Chatflow 面向多步骤对话，Workflow 面向自动化批处理', '复杂业务流程自动化', 'Rasa、n8n.io'],
-         ],
-         source='Source: Dify 介绍与实战 · §3.2.1–3.2.4'),
+         ]),
 
     # ── 11 五项辅助能力 ─────────────────────────────────────
     dict(layout='numbered_columns', kicker='03 Dify 能做什么', title='应用之外：五项辅助能力',
@@ -166,8 +156,7 @@ SLIDES = [
              dict(name='内容审核', desc='支持敏感词过滤，确保对话安全合规'),
              dict(name='数据分析', desc='提供详细的使用数据与效果分析'),
              dict(name='API 集成', desc='支持通过 API 调用集成到其他系统'),
-         ],
-         source='Source: Dify 介绍与实战 · §3.2.5 其他辅助功能'),
+         ]),
 
     # ── 12 版本与定价 ───────────────────────────────────────
     dict(layout='data_table', kicker='03 Dify 能做什么', title='产品版本与定价',
@@ -182,8 +171,7 @@ SLIDES = [
              ['存储空间', '50MB', '5GB', '20GB'],
              ['API 限额', '5,000 / 天', '不限', '不限'],
              ['日志历史', '30 天', '不限', '不限'],
-         ],
-         source='注册即赠 200 条 OpenAI 消息额度 · 学生与教育工作者免费 · 价格不含当地税费'),
+         ]),
 
     # ── 13 实战一：聊天助手五步 ─────────────────────────────
     dict(layout='process_chain', kicker='04 实战一 · 聊天助手',
@@ -197,8 +185,7 @@ SLIDES = [
          ],
          note=[('基础编排不修改内置提示，最适合新手起步', {'size': 15, 'color': 'DARK', 'bold': True}),
                ('；提示词生成器只需输入需求与说明，AI 即可产出可直接使用的提示词。',
-                {'size': 15, 'color': 'MUTED'})],
-         source='Source: Dify 介绍与实战 · §4.1 聊天助手'),
+                {'size': 15, 'color': 'MUTED'})]),
 
     # ── 14 模型参数 ─────────────────────────────────────────
     dict(layout='data_table', kicker='04 实战一 · 聊天助手', title='模型参数：一次说清怎么调',
@@ -213,8 +200,7 @@ SLIDES = [
              ['存在惩罚 Presence', '0–1', '对已出现的 token 施加惩罚以降低重复；不确定时建议设为 0'],
              ['频率惩罚 Frequency', '0–1', 'token 每次出现时施加惩罚以降低重复；不确定时建议设为 0'],
              ['最大标记 Max tokens', '—', '最大生成长度，建议调大，并按不同模型的最大输出长度调整'],
-         ],
-         source='技巧：要唯一准确答案 → top-k / top-p / temperature 设为 0；要更多样性 → top-p 设 0.95'),
+         ]),
 
     # ── 15 实战二：知识库七步 ───────────────────────────────
     dict(layout='timeline_vertical', kicker='04 实战二 · 企业知识库',
@@ -227,8 +213,7 @@ SLIDES = [
              dict(name='编写 Prompt', desc='用 PromptPerfect 把简单需求优化成结构化提示词'),
              dict(name='引用知识库', desc='「上下文 → 添加 → 选中知识库 → 点击添加」'),
              dict(name='调试与发布', desc='对比助手输出与企业文档原文，检查是否引用'),
-         ],
-         source='支持的格式：TXT / Markdown / PDF / HTML / XLSX / DOCX / CSV / PPTX / XML / EPUB 等 14 种'),
+         ]),
 
     # ── 16 实战三：工作流节点 ───────────────────────────────
     # 原先用 node_flow（8 个描边方框 + 折返连线）渲染。那套版式已删除，改投
@@ -245,8 +230,7 @@ SLIDES = [
              dict(name='输入与标题', nodes=['Start 收集信息', '生成标题']),
              dict(name='正文与配图', nodes=['生成正文', '生成封面前言', '生成封面图']),
              dict(name='取图与输出', nodes=['获取封面图 URL', '组装结果', 'End 结束']),
-         ],
-         source='Source: Dify 介绍与实战 · §4.3 小红书运营一条龙工作流'),
+         ]),
 
     # ── 17 结语 ─────────────────────────────────────────────
     dict(layout='quote', kicker='05 落地要点',
@@ -262,6 +246,5 @@ SLIDES = [
              [('第三步', {'size': 16, 'color': 'DARK', 'bold': True}),
               ('  用工作流把重复的内容生产串成流水线，让 AI 真正进入日常业务。',
                {'size': 16, 'color': 'MUTED'})],
-         ],
-         source='Source: Dify 介绍与实战 · 全书要点 · Dify Next Steps'),
+         ]),
 ]

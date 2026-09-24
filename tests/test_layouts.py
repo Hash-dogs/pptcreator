@@ -436,7 +436,7 @@ class TestDisabledLayoutsStayOut(unittest.TestCase):
 
     def test_normalise_plan_unknown_layout_uses_an_enabled_one(self):
         outline = dict(title='T', toc=[], sections=[dict(name='01 甲', summary='', pages=[
-            dict(title='页一', hint='', source='S1')])])
+            dict(title='页一', hint='')])])
         with self._off('statement', 'quote'):
             plan = pipeline._normalise_plan(
                 [dict(layout='并不存在的版式', title='页一')], outline)
@@ -462,8 +462,7 @@ class TestDisabledLayoutsStayOut(unittest.TestCase):
         tpl = _template()
         if tpl is None:
             self.skipTest('模板文件不存在，跳过渲染回归')
-        page = dict(title='选择性同步：客户端与服务端双重规则',
-                    hint='', source='Source: 《白皮书》· 12')
+        page = dict(title='选择性同步：客户端与服务端双重规则', hint='')
         slides, banned = [], {'statement', 'quote'}
         for _ in range(len(pipeline._TITLE_ONLY_ORDER)):
             with mock.patch.object(layout_spec, '_DISABLED', set(banned)):
@@ -704,14 +703,15 @@ class TestTruncationIsReported(unittest.TestCase):
         if tpl is None:
             raise unittest.SkipTest('模板文件不存在')
         tmp = tempfile.mkdtemp(prefix='pptgen-trunc-')
-        # 来源行走 `fit_one_line`（单行定高 0.30"），长到一定程度必然被截断。
-        spec = dict(FIXTURES[1][1])
-        spec['source'] = 'Source: 《' + '很长的来源说明' * 8 + '》'
+        # 指标卡的 note 行是单行定高框，走 `fit_one_line`，长到一定程度必然被截断。
+        spec = dict(next(s for _, s in FIXTURES if s['layout'] == 'kpi_grid'))
+        spec['items'] = [dict(it) for it in spec['items']]
+        spec['items'][0]['note'] = '很长的图注说明' * 8
         seen = []
         build.build(dict(slides=[spec], toc=[]), tpl,
                     os.path.join(tmp, 'x.pptx'), on_log=seen.append)
         self.assertTrue(any('截断' in m for m in seen), seen)
-        self.assertTrue(any('很长的来源说明' in m for m in seen), seen)
+        self.assertTrue(any('很长的图注说明' in m for m in seen), seen)
 
 
 class TestCustomLayouts(unittest.TestCase):
