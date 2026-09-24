@@ -7,3 +7,6 @@ __pycache__/
 # 浏览器自动化（playwright skill）留下的产物
 .playwright-cli/
 output/
+
+# 临时截图，项目代码不引用
+image.png

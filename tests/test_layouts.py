@@ -39,7 +39,31 @@ def _template():
     return p if os.path.isfile(p) else None
 
 
-class TestRegistry(unittest.TestCase):
+class _LibraryIntact(unittest.TestCase):
+    """假设「版式库是全的」的测试类继承它。
+
+    `_state.json` 里的 `disabled` 是**跑测试这台机器上的用户状态**，而
+    `layout_store.load_all()` 一个进程只加载一次 —— 于是同一个文件，单跑一个
+    模块与跑整个 discover 会拿到不同的启用状态（实测：本机禁用了
+    statement / quote 之后，本文件的 `test_intent_maps_to_matching_layouts`
+    与 `test_every_layout_is_reachable_by_intent` 单跑必挂）。这些断言讲的是
+    「版式系统的设计」，不该随用户禁用了哪几套而变，所以在这里显式声明
+    「一套都没禁用」；禁用相关的断言各自 `set_disabled` / 打补丁。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._disabled_before = layout_spec.disabled_names()
+        layout_spec.set_disabled([])
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        layout_spec.set_disabled(cls._disabled_before)
+        super().tearDownClass()
+
+
+class TestRegistry(_LibraryIntact):
     def test_renderers_and_specs_match(self):
         """每个渲染函数都有元数据，每条元数据都有渲染函数。"""
         self.assertEqual(sorted(layouts.LAYOUTS), sorted(layout_spec.REGISTRY))
@@ -257,11 +281,12 @@ class TestRichTextTolerance(unittest.TestCase):
         self.assertEqual([], tokens.paras([]))
 
 
-class TestPlanStage(unittest.TestCase):
+class TestPlanStage(_LibraryIntact):
     """意图 → 候选 → 护栏。这一层决定「版式选得贴不贴内容」。"""
 
     @classmethod
     def setUpClass(cls):
+        super().setUpClass()
         cls.doc = _doc()
 
     def _outline(self):
@@ -366,6 +391,100 @@ class TestPlanStage(unittest.TestCase):
         for name, spec in FIXTURES:
             self.assertEqual('', pipeline.overflow_reason(spec),
                              '%s 的样例自己就超容量' % name)
+
+
+class TestDisabledLayoutsStayOut(unittest.TestCase):
+    """禁用清单是用户的显式选择，**代码兜底没有资格绕过它**。
+
+    现场：在版式管理里禁用 `statement` / `quote` 之后，一份 21 页的 deck 里
+    照样有两页是「一行字」的 statement。它们不是模型选的 —— 是确定性兜底
+    硬写的。硬写 statement 的地方有四处：`_heuristic_slide` 的「本页没有素材」
+    分支与收尾、`allowed` 为空时的 `or ['statement']`、`_normalise_plan` 的
+    「版式名未知」替换、`layout_spec.resolve` 的全局兜底。
+
+    这里不碰磁盘上的 `_state.json`（那会让测试随环境变），直接改
+    `layout_spec._DISABLED` —— 它是 `is_enabled()` 唯一读的东西。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = _doc()
+
+    def _off(self, *names):
+        return mock.patch.object(layout_spec, '_DISABLED', set(names))
+
+    def test_title_only_picks_an_enabled_layout(self):
+        with self._off('statement', 'quote'):
+            sl = pipeline._title_only('选择性同步的两套规则', '本章讲这两套规则')
+            self.assertTrue(layout_spec.is_enabled(sl['layout']), sl['layout'])
+        # 一套都没禁用时保持原样：一行大字本来就是 statement 的本职
+        with self._off():
+            self.assertEqual('statement', pipeline._title_only('标题')['layout'])
+
+    def test_page_without_material_does_not_fall_back_to_a_disabled_layout(self):
+        """**本页没有素材**正是这次的现场：没有内容可排时 `_heuristic_slide`
+        直接返回 statement —— 候选集与启用清单都不看。"""
+        page = dict(title='选择性同步：客户端与服务端双重规则')
+        with self._off('statement', 'quote'):
+            sl = pipeline._heuristic_slide(page, '04 同步共享安全', [],
+                                          candidates=['comparison_rows'],
+                                          summary='本章讲选择性同步的两套规则')
+        self.assertNotIn(sl['layout'], ('statement', 'quote'))
+        # 素材是真的没有，所以也不能编：能放上去的只有标题与本章 summary
+        self.assertEqual('本章讲选择性同步的两套规则', sl.get('thesis'))
+        self.assertEqual([], sl.get('points'))
+
+    def test_normalise_plan_unknown_layout_uses_an_enabled_one(self):
+        outline = dict(title='T', toc=[], sections=[dict(name='01 甲', summary='', pages=[
+            dict(title='页一', hint='', source='S1')])])
+        with self._off('statement', 'quote'):
+            plan = pipeline._normalise_plan(
+                [dict(layout='并不存在的版式', title='页一')], outline)
+        sl = plan['slides'][0]
+        self.assertNotIn(sl['layout'], ('statement', 'quote'))
+        self.assertEqual('页一', sl['title'])        # 页眉照旧回填
+
+    def test_fallback_plan_never_uses_a_disabled_layout(self):
+        with mock.patch.object(config, 'llm_config', lambda: None):
+            out = pipeline.make_outline(self.doc)
+            with self._off('statement', 'quote'):
+                plan = pipeline.make_plan(out, self.doc)
+        used = {s['layout'] for s in plan['slides']}
+        self.assertEqual(set(), used & {'statement', 'quote'}, sorted(used))
+
+    def test_title_only_pages_render(self):
+        """三档兜底页都要真的渲得出来（`_TITLE_ONLY_ORDER` 逐级禁用各渲一张）。
+
+        几何回归覆盖不到它们：`FIXTURES` 里每套版式都按**满容量**写样例，
+        而兜底页恰恰是空的（`executive_summary` 的 points 为空、`tinted_bands`
+        只有一条带）—— 而它又是坏掉时最难看的那种页。
+        """
+        tpl = _template()
+        if tpl is None:
+            self.skipTest('模板文件不存在，跳过渲染回归')
+        page = dict(title='选择性同步：客户端与服务端双重规则',
+                    hint='', source='Source: 《白皮书》· 12')
+        slides, banned = [], {'statement', 'quote'}
+        for _ in range(len(pipeline._TITLE_ONLY_ORDER)):
+            with mock.patch.object(layout_spec, '_DISABLED', set(banned)):
+                sl = pipeline._title_only(page['title'], '本章讲选择性同步的两套规则')
+            slides.append(pipeline._fill_header(
+                sl, page, '04 同步共享安全'))
+            banned.add(sl['layout'])
+        tmp = tempfile.mkdtemp(prefix='pptgen-titleonly-')
+        path = os.path.join(tmp, 'title-only.pptx')
+        build.build(dict(slides=slides, toc=['04 同步共享安全']), tpl, path)
+        rep = geometry.analyse(path)
+        errs = [i for i in rep['issues'] if i['severity'] == 'error']
+        self.assertEqual([], errs, geometry.format_report(rep))
+
+    def test_resolve_never_returns_a_disabled_layout(self):
+        """`resolve()` 是候选塌空时的最后一道 —— 它不能把禁用版式放回来。"""
+        for role, intent in (('content', 'quote'), ('section', 'section')):
+            with self._off('statement', 'quote', 'section_divider'):
+                sp = layout_spec.resolve(None, role, intent)
+                self.assertTrue(layout_spec.is_enabled(sp.name),
+                                '%s/%s → %s' % (role, intent, sp.name))
 
 
 class TestRenderAll(unittest.TestCase):

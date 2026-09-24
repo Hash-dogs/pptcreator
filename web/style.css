@@ -385,13 +385,21 @@ a.dl:hover{background:#00345F}
   background:rgba(255,255,255,.92); border-radius:4px; padding:2px 4px;
 }
 .preview-card .pick input{margin:0; cursor:pointer}
-.layout-tag{
-  position:absolute; top:6px; right:6px; z-index:2;
-  background:rgba(35,31,32,.72); color:#fff; border-radius:3px;
-  padding:2px 6px; font-size:11px; letter-spacing:.2px;
+/* 改动角标：**只有被改过的页才有**。位置是「一眼扫过去就看得见」的那个角，
+   所以放在缩略图右上角；文字固定（不像原先的版式名那样长短不一），一排图
+   扫下来是齐的。
+   ⚠️ 选择器必须带 `.preview-card`：`.preview-card span`（0,1,1）比 `.changed-tag`
+   （0,1,0）更具体，会把 color / margin-top 盖回去 —— 原先的版式名标签就是这么
+   被盖成灰字的（深灰底 + 灰字，正是「看不清又难看」的来源）。 */
+.preview-card .changed-tag{
+  position:absolute; top:6px; right:6px; z-index:2; margin:0;
+  display:inline-block; background:var(--red); color:#fff;
+  border-radius:3px; padding:2px 7px;
+  font-size:11px; font-weight:700; letter-spacing:.3px;
 }
 .preview-card.changed{border-color:var(--red)}
-.preview-card.changed span::after{content:" · 已改动"; color:var(--red); font-weight:700}
+/* 「 · 已改动」原先缀在下面那行页码后面 —— 角标已经把这件事说清楚了，
+   两处都标等于同一句话说两遍。 */
 .lb-toggle{
   border:1px solid rgba(255,255,255,.35); background:rgba(255,255,255,.1);
   color:#fff; border-radius:14px; padding:5px 12px; font-size:12.5px;

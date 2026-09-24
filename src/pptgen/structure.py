@@ -515,6 +515,64 @@ def page_index(sk: dict) -> dict:
     return out
 
 
+# 骨架摘要里「页名」与「首句」之间用全角空格分隔，行尾挂`（N 字）`
+# （见 `skeleton_digest`）。大纲模型被要求「照抄源页标题」，实际抄回来的
+# 常常是**整行摘要** —— 这两个正则把那层包装剥掉。
+_DIGEST_CHARS_RE = re.compile(r'（\s*\d+\s*字\s*）\s*$')
+_DIGEST_SEP = '　'
+
+
+def _anchor_variants(anchor: str) -> list[str]:
+    """一条 anchor 的几种读法，从最严（原样）到最松（只留页名）。"""
+    out = [anchor]
+    body = _DIGEST_CHARS_RE.sub('', anchor).strip()
+    if body and body != anchor:
+        out.append(body)
+    head = body.split(_DIGEST_SEP)[0].strip()
+    if head and head != body:
+        out.append(head)
+    return out
+
+
+def _anchor_key(text: str) -> str:
+    """词序与空白都无关的比较键：`群晖白皮书 06` 与 `06 群晖白皮书` 同键。
+
+    PDF 的页眉里「序号 + 文档名」的顺序并不稳定，模型抄回来的顺序也就跟着飘。
+    """
+    return ''.join(sorted((text or '').split()))
+
+
+def match_page_name(sk: dict, anchor: str) -> str:
+    """模型写的 `anchor` → 骨架里**真实存在**的源页名；对不上返回 `''`。
+
+    这道尺子存在的理由：`anchor` 是「这页的内容在源文档的哪一段」的唯一索引，
+    对不上就取不到任何源块（`pipeline._content_index`），而**取不到素材是静默的** ——
+    实测一份白皮书 13 页的 anchor 全部是整行摘要（`12 群晖白皮书　选择性同步…
+    （1380 字）`），于是每一页的素材都是空的：模型那条路拿全文写内容看不出来，
+    一旦掉进确定性兜底，产出的就是「一页只有一行标题」的空白页。
+
+    匹配从严到松：原样 → 剥掉`（N 字）` → 再剥掉`　首句` → 词序无关的键。
+    """
+    names = [p['name'] for c in sk.get('chapters') or []
+             for p in c.get('pages') or []]
+    a = (anchor or '').strip()
+    if not a or not names:
+        return ''
+    if a in names:
+        return a
+    variants = _anchor_variants(a)
+    stripped = {n.strip(): n for n in names}
+    for cand in variants:
+        if cand in stripped:
+            return stripped[cand]
+    keys = {_anchor_key(n): n for n in names}
+    for cand in variants:
+        hit = keys.get(_anchor_key(cand))
+        if hit:
+            return hit
+    return ''
+
+
 def section_text(blocks: list[dict], chapter: dict, max_chars: int = 6000,
                  front_matter: list[int] | None = None) -> str:
     """取某一章的原文（按块区间切），并压到 `max_chars` 以内。

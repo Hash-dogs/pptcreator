@@ -1221,7 +1221,9 @@ def redo_slide(deck: dict, preview: int, outline: dict, doc: dict, request: str,
     # 两次都不合规 → 确定性生成。字段必然对得上，但内容只能来自原文条目 ——
     # 这是**可听见的降级**，不静默：原因原样带回给用户。
     log('[revise]   第 %d 页退回确定性生成' % preview)
-    sl = pipeline._heuristic_slide(page, section, blocks, candidates=cands, taken=used)
+    sl = pipeline._heuristic_slide(page, section, blocks, candidates=cands,
+                                   taken=used,
+                                   summary=_outline_summary(outline, i))
     return pipeline._fill_header(sl, page, section), \
         '模型两次都没给出合规的重做，已按原文条目重新排版（内容可能不如预期）'
 
@@ -1241,4 +1243,15 @@ def _outline_section(outline: dict, i: int) -> str:
     names = [s.get('name') or '' for s in (outline.get('sections') or [])
              for _ in (s.get('pages') or [])]
     return names[i] if i < len(names) else ''
+
+
+def _outline_summary(outline: dict, i: int) -> str:
+    """`slides[i]` 所属章节的 summary —— 与 `_outline_section` 同一套下标对齐。
+
+    兜底页（`_heuristic_slide` 取不到素材时）只有这句能当正文，所以这条
+    降级路也要带上它，不能只有规划路带（`pipeline._plan_by_llm`）。
+    """
+    got = [s.get('summary') or '' for s in (outline.get('sections') or [])
+           for _ in (s.get('pages') or [])]
+    return got[i] if i < len(got) else ''
 

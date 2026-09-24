@@ -86,6 +86,10 @@ def _content_index(doc: dict):
     匹配」稳得多：LLM 大纲给的是自创的主张式标题（如「七大价值：…」），永远
     匹配不上任何 heading，于是每一页都退化成只有标题的 statement 页、且不报错。
     锚点允许缺失或过期（人工编辑过大纲），取不到再退回标题匹配。
+
+    锚点查找要**容错**（`structure.match_page_name`）：模型抄回来的常常是整行
+    骨架摘要而不是页名。严格相等在这里是一种**静默失败** —— 一条都对不上时整份
+    deck 的素材都是空的，而它只表现为「掉进兜底的那几页只剩一行标题」。
     """
     blocks_all = doc['blocks']
     # 骨架缺失就现场重算 —— parsed.json 可能是加骨架之前写的旧文件，
@@ -103,7 +107,10 @@ def _content_index(doc: dict):
             by_title[cur].append(b)
 
     def content_of(page: dict) -> list[dict]:
-        span = spans.get((page.get('anchor') or '').strip())
+        a = (page.get('anchor') or '').strip()
+        span = spans.get(a)
+        if span is None and a:
+            span = spans.get(structure.match_page_name(sk, a)) or None
         if span:
             return [blocks_all[i] for i in range(span[0], span[1])
                     if blocks_all[i]['type'] != 'heading']
@@ -656,6 +663,10 @@ def _outline_by_llm(doc, src, lo, hi, cfg, log=print) -> dict:
         # 重试仍不合格也不退回兜底（兜底更差）—— 确定性修能修的部分，其余记 warning。
         data['_warnings'] = _repair_outline(data, sk, lo, hi, problems)
         log('[outline] 已确定性修正：%s' % '；'.join(data['_warnings']))
+    # anchor 归一到**真实存在的源页名**：规划阶段靠它取源素材。位置要在
+    # `_normalise_outline` 之前 —— 那里会用 `content_of(p)` 重算 intent，
+    # anchor 还是整行摘要时那次重算拿到的也是空素材。
+    _align_anchors(data.get('sections') or [], sk, log)
     # 超长标题交给模型缩写。位置有两处讲究：
     #   晚于 `_repair_outline` —— 它会用骨架章名把 section name 盖回去；
     #   早于 `_normalise_outline` —— toc 在那里按章节名 + summary 生成，
@@ -905,6 +916,31 @@ def _repair_outline(data: dict, sk: dict, lo: int, hi: int,
 
 
 
+def _align_anchors(sections: list[dict], sk: dict, log=print) -> int:
+    """把每页的 `anchor` 归一到骨架里**真实存在**的源页名。返回对不上的页数。
+
+    只归一、不改写语义：能容错匹配上的（`structure.match_page_name`）换成源页名，
+    匹配不上的**原样留着**—— 它多半是人工编辑过的锚点或旧 deck 的遗留，
+    悄悄改掉反而更难查。对不上的数量会记进日志与 warning，因为它意味着
+    这些页取不到源素材（表现是「这一页只剩一行标题」）。
+    """
+    bad = []
+    for s in sections:
+        for p in s.get('pages') or []:
+            a = (p.get('anchor') or '').strip()
+            if not a:
+                continue
+            name = structure.match_page_name(sk, a)
+            if name:
+                p['anchor'] = name
+            else:
+                bad.append(p.get('title') or a)
+    if bad:
+        log('[outline] %d 页的 anchor 对不上源页标题，这些页取不到源素材：%s'
+            % (len(bad), '、'.join(bad[:3])))
+    return len(bad)
+
+
 def _outline_oneshot(doc, src, lo, hi, cfg, sk, feedback=None) -> dict:
     fix = ''
     if feedback:
@@ -929,7 +965,9 @@ def _outline_oneshot(doc, src, lo, hi, cfg, sk, feedback=None) -> dict:
 - 每章至少 1 页；**页可以在章内合并，章节不可合并、不可丢弃**。
 {quota}- 每页给一个**具体的、有信息量的标题**，不要「概述」「简介」这类空标题。
 {_TITLE_RULE}- 每页标注最适合的展示形态 hint（如「对比表」「流程图」「三个并列要点」「一个核心数字」）。
-- 每页给 source（来源标注），并给 anchor：填它主要取材的那条源页标题（照抄上面的）。
+- 每页给 source（来源标注），并给 anchor：填它主要取材的那条源页**标题**
+  （上面每条 `-` 后面、全角空格之前的那一截），**只抄页名本身** ——
+  不要带后面的首句，也不要带「（N 字）」。anchor 是取源素材的索引，多抄一个字就取不到了。
 - {_mode_hint()}
 {_INTENT_BLOCK}{fix}{_HEAD_TAIL}"""
     return llm.ask_json(prompt, cfg, system=_SYSTEM,
@@ -971,7 +1009,8 @@ def _outline_chunked(doc, sk, lo, hi, cfg) -> dict:
 - 为本章设计 **{k} 页**，顺序与原文一致。
 - 页可以在章内合并，但不要跨章取材。
 - 每页给一个具体的、有信息量的标题，不要「概述」「简介」这类空标题。
-{_TITLE_RULE}- 每页标注展示形态 hint、来源 source，以及 anchor（照抄本章源页标题里最相关的一条）。
+{_TITLE_RULE}- 每页标注展示形态 hint、来源 source，以及 anchor：本章源页**标题**里最相关的那一条，
+  **只抄页名本身**（上面每条 `-` 后面、全角空格之前的那一截）—— 不要带首句，也不要带「（N 字）」。
 - 数字、专有名词、结论句必须原样保留。
 {_INTENT_BLOCK}
 只输出 JSON：
@@ -1259,13 +1298,14 @@ def _plan_by_llm(outline: dict, doc: dict, src: str, cfg, log) -> dict:
     **这一页的候选集**（按表达意图与容量筛过），于是「大纲写『六参数对比表』、
     规划却选了 timeline_vertical」这类错配从源头被掐掉。
     """
-    flat = [(s['name'], p) for s in outline['sections'] for p in s['pages']]
+    flat = [(s, p) for s in outline['sections'] for p in s['pages']]
     roles = _page_roles([p for _, p in flat])
     content_of = _content_index(doc)
 
     by_index: dict[int, dict] = {}
     todo: list[tuple[int, dict, dict]] = []       # (下标, 送模型的页, 护栏元信息)
-    for i, ((sec, p), role) in enumerate(zip(flat, roles)):
+    for i, ((s, p), role) in enumerate(zip(flat, roles)):
+        sec = s.get('name') or ''
         if p.get('divider'):
             by_index[i] = _divider_slide(p, sec)
             continue
@@ -1278,11 +1318,21 @@ def _plan_by_llm(outline: dict, doc: dict, src: str, cfg, log) -> dict:
                          'hint': p.get('hint', ''), 'intent': intent,
                          'source': p.get('source', ''), 'anchor': p.get('anchor', ''),
                          'candidates': cands},
-                     dict(role=role, intent=intent, candidates=cands,
-                          page=p, section=sec, blocks=blocks)))
+                     dict(role=role, intent=intent, candidates=cands, page=p,
+                          section=sec, summary=s.get('summary') or '',
+                          blocks=blocks)))
+
+    # 取不到素材是**静默的**：页面照样渲出来，只是没有正文可排。整批都空说明
+    # anchor 与源页名对不上（`_content_index` 那两道都查不到），此时容量预筛
+    # （`layout_spec._capacity_ok`）也一并失效 —— 这条日志就是那个报警器。
+    empty = [i + 1 for i, _p, m in todo if not m['blocks']]
+    if empty:
+        log('[plan] %d/%d 页取不到源素材（anchor 没对上源页标题），'
+            '版式的容量预筛对这些页失效' % (len(empty), len(todo)))
 
     used: dict[str, int] = {}
     off_candidate = 0
+    no_material: list[int] = []
     for k in range(0, len(todo), PLAN_BATCH):
         chunk = todo[k:k + PLAN_BATCH]
         log('[plan] 规划第 %d–%d 页（共 %d）…' % (k + 1, k + len(chunk), len(todo)))
@@ -1310,10 +1360,18 @@ def _plan_by_llm(outline: dict, doc: dict, src: str, cfg, log) -> dict:
                     sl = None
             if sl is None:
                 sl = _heuristic_slide(meta['page'], meta['section'], meta['blocks'],
-                                      candidates=meta['candidates'], taken=used)
+                                      candidates=meta['candidates'], taken=used,
+                                      summary=meta['summary'])
+                if not meta['blocks']:
+                    # 确定性兜底**没有素材**可用（模型那条路是从源文档全文写的，
+                    # 看不出来）。产出会是一页只有标题的空白页 —— 必须留痕。
+                    no_material.append(i + 1)
             used[sl.get('layout')] = used.get(sl.get('layout'), 0) + 1
             by_index[i] = sl
 
+    if no_material:
+        log('[plan] 第 %s 页改用确定性兜底且没有素材，产出只有标题'
+            % '、'.join(str(x) for x in no_material))
     if not by_index:
         raise ValueError('规划结果为空')
 
@@ -1327,10 +1385,18 @@ def _plan_by_llm(outline: dict, doc: dict, src: str, cfg, log) -> dict:
             meta = metas.get(i)
             rest = _diversity_alternatives((meta or {}).get('candidates'), prev)
             if meta is not None and rest:
-                log('[plan] 第 %d 页与上一页同为 %s，改用 %s' % (i + 1, prev, rest[0]))
+                # 注意这一页是**整页重做**（`_heuristic_slide`），于是它从
+                # 「模型写的内容」变成「确定性构造的内容」—— 没有素材时就是
+                # 一页只有标题的空白页。日志里那句「改用 X」说的只是版式名。
+                log('[plan] 第 %d 页与上一页同为 %s，改用 %s'
+                    % (i + 1, prev, rest[0]))
                 by_index[i] = _heuristic_slide(
                     meta['page'], meta['section'], meta['blocks'],
-                    candidates=rest, taken=used)
+                    candidates=rest, taken=used, summary=meta['summary'])
+                if not meta['blocks'] and (i + 1) not in no_material:
+                    no_material.append(i + 1)
+                    log('[plan] 第 %d 页改用确定性兜底且没有素材，产出只有标题'
+                        % (i + 1))
         prev = by_index[i].get('layout')
 
     slides = [by_index[i] for i in order]
@@ -1398,25 +1464,34 @@ def _plan_fallback(outline: dict, doc: dict, log=None) -> dict:
     永远匹配不上任何 heading，于是每一页都退化成只有标题的 statement 页、
     且不报错。锚点允许缺失或过期（人工编辑过大纲），取不到再退回标题匹配。
     """
-    flat = [(s['name'], p) for s in outline['sections'] for p in s['pages']]
+    flat = [(s, p) for s in outline['sections'] for p in s['pages']]
     roles = _page_roles([p for _, p in flat])
     content_of = _content_index(doc)
+    empty = 0
 
     slides, taken, prev = [], {}, None
-    for (sec, p), role in zip(flat, roles):
+    for (s, p), role in zip(flat, roles):
+        sec = s.get('name') or ''
         if p.get('divider'):
             slides.append(_divider_slide(p, sec))
             prev = 'section_divider'
             continue
         blocks = content_of(p)
+        if not blocks:
+            empty += 1
         cands = page_candidates(p, role, blocks)
         # 相邻页不得同版式 —— 这条规则与 LLM 路径共用，兜底路径同样受约束
         if prev in cands:
             cands = _diversity_alternatives(cands, prev)
-        sl = _heuristic_slide(p, sec, blocks, candidates=cands, taken=taken)
+        sl = _heuristic_slide(p, sec, blocks, candidates=cands, taken=taken,
+                              summary=s.get('summary') or '')
         taken[sl['layout']] = taken.get(sl['layout'], 0) + 1
         prev = sl['layout']
         slides.append(sl)
+    if empty and log:
+        # 与 LLM 路径同一条报警：整条确定性路径没有素材可取时，产出的
+        # 全是「标题 + 一句 summary」的页 —— 这种 deck 该被看见，不该被交付。
+        log('[plan] %d 页取不到源素材（anchor 没对上源页标题）' % empty)
     return _normalise_plan(slides, outline, log)
 
 
@@ -1462,9 +1537,56 @@ def _looks_like_steps(items: list[str]) -> bool:
     return hits >= max(2, len(items) // 2)
 
 
+# 「这一页没有素材」时能用的版式，从首选往下排。共同点：**不给内容也渲得出来**
+# （statement 本来就没有标题位；executive_summary 的 points 可以是空的；
+# tinted_bands 一条带也成）。挑的时候只看**启用清单** —— 没有内容可排，
+# 也就没有「贴不贴意图」可判，剩下唯一真实的约束是用户禁用了哪些版式。
+_TITLE_ONLY_ORDER = ('statement', 'executive_summary', 'tinted_bands')
+
+
+def _title_only(title: str, summary: str = '',
+                items: list[str] | None = None) -> dict:
+    """没有素材（或构造不出版式字段）时的一页：**标题 + 可选的一句 summary**。
+
+    `items` 是手上确实有的要点句（源素材的条目），有就带上、没有就不编 ——
+    这一页宁可空，也不许凭空造内容。
+
+    版式必须从**启用清单**里挑。早先这条路上硬写 `statement`，于是用户明明在
+    版式管理里禁用了它（`layouts_custom/_state.json` 的 `disabled`），deck 里
+    照样出现「一页只有一行字」的 statement —— 禁用挡得住模型选它，挡不住代码
+    兜底把它放回来。
+    """
+    items = [t for t in (items or []) if (t or '').strip()]
+    if layout_spec.is_enabled('statement'):
+        sl = dict(layout='statement', lines=[[(title, {'hl': True})]])
+        if items:
+            sl['body'] = [[(t[:60], {'size': 16, 'color': 'MUTED'})]
+                          for t in items[:3]]
+        return sl
+    if layout_spec.is_enabled('executive_summary'):
+        # 有 summary 当总纲、有 items 当结论条；都没有就是一页干净的标题。
+        sl = dict(layout='executive_summary', points=[])
+        if summary:
+            sl['thesis'] = summary
+        if items:
+            sl['points'] = [dict(num='%02d' % (k + 1), text=t[:60])
+                            for k, t in enumerate(items[:5])]
+        return sl
+    if layout_spec.is_enabled('tinted_bands'):
+        # 带子名的框只有 2.6"（版式声明的 ≤10 字），标题在这里放不下：**有意**截到
+        # 10 字。页眉上印的是完整标题，这一条只是「这页讲什么」的引子。
+        return dict(layout='tinted_bands',
+                    bands=[dict(name=title[:10], desc=summary or
+                                (items[0][:52] if items else ''))])
+    # `_TITLE_ONLY_ORDER` 被禁光了（不该发生）：宁可渲一页 statement，也不能让
+    # build 在 KeyError 上崩掉 —— 渲染函数与被禁用与否无关，禁的只是「被选中」。
+    return dict(layout='statement', lines=[[(title, {'hl': True})]])
+
+
 def _heuristic_slide(page: dict, section: str, blocks: list[dict], *,
                      candidates: list[str] | None = None,
-                     taken: dict | None = None) -> dict:
+                     taken: dict | None = None,
+                     summary: str = '') -> dict:
     """确定性版式选择：无模型时用它，模型给了候选外版式的那一页也用它。
 
     这一层**注定只是兜底** —— 内容的取舍与标题的主张都依赖模型。它只保证四件事：
@@ -1473,6 +1595,8 @@ def _heuristic_slide(page: dict, section: str, blocks: list[dict], *,
     `candidates` 是已按意图与容量筛过的候选集（见 `page_candidates`），
     `taken` 是用过的版式计数 —— 在候选里优先挑没用过的，避免整份 deck
     退化成同一个版式（这正是「18 页里 12 页同一种版式」的成因）。
+    `summary` 是这一章的一句话概括：**没有素材时**它是这一页唯一能理直气壮
+    放上去的内容（`_title_only`）。
     """
     paras = [b['text'] for b in blocks if b['type'] == 'para']
     bullets = [i for b in blocks if b['type'] == 'bullets' for i in b['items']]
@@ -1482,27 +1606,46 @@ def _heuristic_slide(page: dict, section: str, blocks: list[dict], *,
     title = page.get('title') or section
     tbl = tables[0] if tables else None
 
-    allowed = [c for c in (candidates or _BUILDABLE) if c in _BUILDABLE] or ['statement']
+    allowed = [c for c in (candidates or _BUILDABLE) if c in _BUILDABLE]
+    if not allowed:
+        # 候选里一个「确定性构造得出来」的版式都没有（其余的版式要模型才有的
+        # 信息：层级名、图表序列、进度状态……）。此时**不能**退回 statement ——
+        # 那等于让兜底绕过用户的禁用清单（实测：禁用 statement 之后它照样出现）。
+        # 改成在**启用的**可构造版式里挑，下面那串 `pick` 的次序本来就是按
+        # 内容形态写的（有几条、像不像步骤、有没有表），照样适用。
+        allowed = [c for c in _BUILDABLE if layout_spec.is_enabled(c)]
     used = taken or {}
 
     def pick(*order) -> str:
+        """按给定次序挑一个，**优先挑用得最少的**。
+
+        「用一个没出现过的」在候选集大时等于「优先没用过的」，而在候选用得差不多
+        之后（同一形态的页很多时）它就退化成永远取第一个 —— 实测一份 13 页的
+        兜底 deck 里 10 页是同一个版式。取用量的最小值把分布摊平。
+        可构造的版式被禁光（`allowed` 为空）时返回空串 —— 交给收尾的
+        `_title_only`，它按启用清单挑，最后才轮到 statement。
+        """
         pool = [c for c in order if c in allowed] or allowed
-        fresh = [c for c in pool if not used.get(c)]
-        return (fresh or pool)[0]
+        return min(pool, key=lambda c: used.get(c, 0)) if pool else ''
 
     items = [i.strip() for i in (bullets or paras) if (i or '').strip()]
     n = len(items)
 
     if n == 0:
-        return dict(layout='statement',
-                    lines=[[(title, {'hl': True})]], **base)
+        # 这一页**没取到素材**（anchor 没对上源页标题，见 `_content_index`）。
+        # 不编内容：标题 + 本章 summary 撑一页，垫底版式由 `_title_only` 按
+        # 启用清单挑。调用方会为此记一条日志（`_plan_by_llm`）。
+        return dict(_title_only(title, summary), **base)
 
     if tbl and n <= 5 and 'split_main_aside' in allowed:
         want = 'split_main_aside'          # 有表又有要点 —— 一页讲两件事
     elif tbl and 'data_table' in allowed:
         want = 'data_table'
     elif n <= 2:
-        want = pick('statement')
+        # 一两条时首选大字陈述；它被禁用、不在候选里、或已经用过一次时，
+        # 退到别的**装得下一两条**的版式（`numbered_columns` 声明的是 4–9 条，
+        # 不在此列）
+        want = pick('statement', 'tinted_bands', 'executive_summary')
     elif n == 4 and 'quadrant' in allowed:
         want = pick('quadrant', 'numbered_columns', 'tinted_bands')
     elif 3 <= n <= 5 and 'process_chain' in allowed and _looks_like_steps(items):
@@ -1544,8 +1687,18 @@ def _heuristic_slide(page: dict, section: str, blocks: list[dict], *,
         return dict(layout='numbered_columns', title=title, columns=3,
                     items=[dict(name=a, desc=b)
                            for a, b in map(_split_item, items[:9])], **base)
-    return dict(layout='statement', lines=[[(title, {})]],
-                body=[[(p, {'size': 16, 'color': 'MUTED'})] for p in items[:3]], **base)
+    if want == 'executive_summary':
+        # 结论条用的是**完整句**，源素材的要点句正好是 —— 不要切开（`_split_item`）
+        spec = dict(layout='executive_summary', title=title, points=[])
+        if summary:
+            spec['thesis'] = summary
+        spec['points'] = [dict(num='%02d' % (k + 1), text=t[:60])
+                          for k, t in enumerate(items[:5])]
+        return dict(spec, **base)
+    # 走到这里只剩两种可能：`want == 'statement'`，或者候选里一个确定性构造得出来的
+    # 版式都没有。都交给 `_title_only` —— 它按**启用清单**挑版式（禁用 statement 时
+    # 不会硬塞回来），手上有的要点句照带上，没有就不编。
+    return dict(_title_only(title, summary, items), **base)
 
 
 def _fill_header(sl: dict, page: dict, section: str) -> dict:
@@ -1596,9 +1749,12 @@ def _normalise_plan(slides: list[dict], outline: dict, log=None) -> dict:
         if name not in LAYOUT_NAMES:
             # 这行以前只进 stdout —— 服务器上看不到、日志里也没有，
             # 而「版式名不被识别」正是内容会突然变得单调的典型原因。
-            (log or print)('[plan] 第 %d 页版式 %r 未知，改用 statement' % (i, name))
-            sl = dict(layout='statement',
-                      lines=[[(sl.get('title') or '未命名', {})]])
+            # 替换用的版式也走 `_title_only`：这里同样不该硬塞 statement
+            # （它可能正被用户禁用着），而且**模型给的字段是照着那个不存在的
+            # 版式填的**，原样留着反而会在渲染时缺键。
+            sl = _title_only(str(sl.get('title') or '未命名'))
+            (log or print)('[plan] 第 %d 页版式 %r 未知，改用 %s'
+                           % (i, name, sl['layout']))
         clean.append(_fill_header(
             sl, pages[i - 1] if i - 1 < len(pages) else {},
             sections[i - 1] if i - 1 < len(sections) else ''))

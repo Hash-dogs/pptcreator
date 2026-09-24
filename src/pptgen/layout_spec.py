@@ -331,6 +331,20 @@ def resolve(sp: LayoutSpec | None, role: str, intent: str,
             return s
     if pool:                       # 全被 take 占满也认了，总比返回一个禁用的好
         return pool[0]
+    # 连候选都没有（该意图的版式被禁光了）：从**启用的**版式里挑同角色的一个；
+    # 同角色的也一个不剩，就退到任意一个启用的 —— 唯独不放被禁用的回来。
+    # 早先这里直接给 statement：用户禁用了它，兜底又把它放回来，于是
+    # 「我明明禁了它，deck 里照样有」成了一条查不出的怪事（实测）。禁用清单
+    # 是用户的显式选择，兜底没有资格绕过它。
+    pool = [REGISTRY[n] for n in enabled_names()]
+    same_role = [sp for sp in pool
+                 if (sp.roles == ('section',)) == (role == 'section')]
+    if same_role:
+        return same_role[0]
+    if pool:
+        return pool[0]
+    # 一套都不剩（注册表为空 / 全被禁）：宁可返回 statement 让 build 有东西可渲，
+    # 也不能返回 None 让调用方在 `.name` 上崩掉。
     return (REGISTRY.get('statement')
             or LayoutSpec(name='statement', roles=('content',)))
 

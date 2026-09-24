@@ -119,18 +119,24 @@ def pptx_doc() -> dict:
     return parse.parse_bytes(make_pptx_bytes(), '夹具.pptx')
 
 
-def _slide_text(spec: dict, skip=('layout', 'title', 'kicker', 'source', 'page')) -> str:
-    """把一个 slide spec 里所有渲染出来的文字拼起来（用于断言「取到内容了」）。"""
+def _slide_text(spec, skip=('layout', 'title', 'kicker', 'source', 'page')) -> str:
+    """把一个 slide spec 里所有渲染出来的文字拼起来（用于断言「取到内容了」）。
+
+    递归到底。早先只处理 str/list，条目里的 `{"name":…, "desc":…}` 直接掉在
+    地上 —— 于是 `tinted_bands`、`numbered_columns` 这些版式在断言里等于
+    「空页」，而它们内容明明都在。
+    """
     out = []
-    for k, v in spec.items():
-        if k in skip:
-            continue
-        if isinstance(v, str):
-            out.append(v)
-        elif isinstance(v, list):
-            out.extend(_slide_text({'x': x}, skip) if isinstance(x, dict) else str(x)
-                       for x in v)
-    return ' '.join(out)
+    if isinstance(spec, dict):
+        for k, v in spec.items():
+            if k in skip:
+                continue
+            out.append(_slide_text(v, skip))
+    elif isinstance(spec, (list, tuple)):
+        out.extend(_slide_text(x, skip) for x in spec)
+    elif isinstance(spec, str):
+        out.append(spec)
+    return ' '.join(t for t in out if t)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -354,13 +360,53 @@ class TestOutlineAssembly(unittest.TestCase):
         self.assertIn('这一节的正文说明文字', _slide_text(with_anchor))
 
     def test_plan_fallback_without_anchor_degrades(self):
-        """没有锚点、标题又对不上 → 退化成只有标题的 statement 页。
+        """没有锚点、标题又对不上 → 退化成只有标题的一页。
 
-        这条是「锚点为什么必要」的对照：以前正是这样静默降级的。
+        这条是「锚点为什么必要」的对照：以前正是这样静默降级的（当年是
+        statement；具体用哪套版式现在由**启用清单**决定，见 `_title_only`，
+        所以这里只断言「没有取到素材、产出是标题页」）。
         """
         without = self._plan_one('', '一个自创的主张式标题')
-        self.assertEqual(without['layout'], 'statement')
         self.assertNotIn('这一节的正文说明文字', _slide_text(without))
+        self.assertIn(without['layout'], pipeline._TITLE_ONLY_ORDER)
+
+    def test_plan_fallback_takes_a_digest_line_anchor(self):
+        """anchor 抄成**整行骨架摘要**时也取得到素材。
+
+        实测那份白皮书 13 页的 anchor 全是这种（`12 群晖白皮书　选择性同步…
+        （1380 字）`），一条都对不上 → 整份 deck 的素材是空的，而它只表现为
+        「掉进确定性兜底的那几页只剩一行标题」。
+        """
+        doc = pptx_doc()
+        name = doc['structure']['chapters'][0]['pages'][0]['name']
+        line = self._digest_line(doc, name)
+        got = self._plan_one(line, '一个自创的主张式标题')
+        self.assertIn('这一节的正文说明文字', _slide_text(got))
+
+    def test_align_anchors_rewrites_digest_lines_only(self):
+        """归一：认得出的换成源页名，认不出的**原样留着**（多半是人手写的）。
+
+        归一要在规划之前做 —— 规划阶段靠 anchor 取素材，也靠它重算 intent。
+        """
+        sk = pptx_doc()['structure']
+        name = sk['chapters'][0]['pages'][0]['name']
+        line = self._digest_line(pptx_doc(), name)
+        sections = [dict(name='01 甲', pages=[dict(title='页一', anchor=line),
+                                              dict(title='页二', anchor='对不上的一行')])]
+        logs = []
+        bad = pipeline._align_anchors(sections, sk, log=logs.append)
+        self.assertEqual(1, bad)
+        self.assertEqual(name, sections[0]['pages'][0]['anchor'])
+        self.assertEqual('对不上的一行', sections[0]['pages'][1]['anchor'])
+        self.assertTrue(logs, '对不上时要留下日志')
+
+    @staticmethod
+    def _digest_line(doc: dict, name: str) -> str:
+        """骨架摘要里那一行（`   - 页名　首句（N 字）`）。"""
+        for line in structure.skeleton_digest(doc['structure']).splitlines():
+            if line.strip().startswith('- ' + name):
+                return line.strip()[2:]
+        raise AssertionError('摘要里没有这一页：%s' % name)
 
 
 class TestShortenTitles(unittest.TestCase):

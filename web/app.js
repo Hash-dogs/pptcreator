@@ -596,12 +596,16 @@ function showResult(r) {
       const changed = (r.changed || []).indexOf(i + 1) >= 0;
       // 模板页（封面/目录/封底）不用特别标出来：服务端会按页给出准确的说法
       // （封底没有可改内容；封面/目录微调是改字段、重做是重出文案）。
+      //
+      // 角标**只在被改过的页上出现**（`r.changed` 由 apply/按页修订给）。这里
+      // 原先挂的是常驻的版式名标签 —— 名字长短不一，一排缩略图顶着一排宽窄
+      // 不同的黑条，既乱又没有信息量（版式名在 `tip` 里，悬停就看得到）。
       return '<div class="preview-card' + (meta.kind ? ' k-' + esc(meta.kind) : '')
         + (changed ? ' changed' : '') + '" data-idx="' + i + '"'
         + ' data-kind="' + esc(meta.kind || '') + '" title="' + esc(tip) + '">'
         + '<label class="pick" title="勾选后可用「引用选中的页」">'
         + '<input type="checkbox" data-pick="' + (i + 1) + '"></label>'
-        + (meta.layout ? '<span class="layout-tag">' + esc(meta.layout) + '</span>' : '')
+        + (changed ? '<span class="changed-tag">已改动</span>' : '')
         + '<img loading="lazy" src="' + state.previewUrls[i] + '"'
         + ' alt="' + esc(label) + '">'
         + '<span>' + esc(label) + '</span></div>';
