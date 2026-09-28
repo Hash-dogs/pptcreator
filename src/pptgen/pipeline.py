@@ -12,6 +12,7 @@ import os
 import re
 
 from . import config, layout_spec, llm, structure
+from .parse import BULLET_CHARS
 from .layouts import LAYOUT_NAMES
 from .tokens import text_w_in, wrap_lines
 
@@ -1286,6 +1287,51 @@ def _divider_slide(page: dict, section: str) -> dict:
                 source='')
 
 
+def _reject_reason(sl, cands: list[str]) -> str:
+    """模型这一页为什么不合规（空串 = 合规）。"""
+    if not isinstance(sl, dict):
+        return '模型没有返回可用的这一页'
+    if sl.get('layout') not in cands:
+        # **不能只把 `layout` 名改掉** —— 字段是照着另一个版式填的，
+        # 改名会缺键、渲染时才炸。
+        return '选了候选外的版式 %r' % sl.get('layout')
+    return overflow_reason(sl)
+
+
+def _reask_page(payload: dict, src: str, cfg, used: dict, total: int,
+                cands: list[str], why: str, banned: tuple = ()) -> dict | None:
+    """这一页的模型产物不合规 → **带着原因单页重问一次**。→ 合规的新 spec 或 None。
+
+    与「直接改用确定性兜底」的差别全在**内容**：兜底只能拿裸块重算
+    （`_heuristic_slide`），模型刚写的那份被整个丢掉。实测群晖那份白皮书就是这么
+    退化的 —— 第 6 页模型写的页被相邻去重护栏换掉，页面上出现的是按字符切出来的
+    残句（`Synology Dri` / `ve 与 DSM…`）。
+
+    照 `revise.redo_slide` 的写法：最多两次，把上一次不合规的原因喂回去。两次都不行、
+    或者模型根本调不通，就返回 None —— 兜底是**最后的**退路，不是第一反应。
+    """
+    if not cands:
+        return None
+    notes = ('这一页**重做**：上一次的产出不合规 —— %s。\n'
+             '内容照旧从源文档取，不要因为换版式就丢掉要点，只是换一种排法。' % why)
+    if banned:
+        notes += '\n不要用这些版式（相邻页已经在用）：%s。' % '、'.join(
+            sorted(b for b in banned if b))
+    last = ''
+    for _ in range(2):
+        try:
+            got = _plan_batch([dict(payload, candidates=list(cands))], src, cfg,
+                              used, total, notes=notes + last)
+        except llm.LLMError:
+            return None                      # 模型不可用：交给兜底
+        sl = got[0] if got and isinstance(got[0], dict) else None
+        why2 = _reject_reason(sl, cands)
+        if not why2:
+            return sl
+        last = '\n上一次仍然不合规：%s。' % why2
+    return None
+
+
 def _plan_by_llm(outline: dict, doc: dict, src: str, cfg, log) -> dict:
     """逐页：算意图与内容形态 → 收窄候选 → 模型在候选内选 → 过一致性护栏。
 
@@ -1326,33 +1372,26 @@ def _plan_by_llm(outline: dict, doc: dict, src: str, cfg, log) -> dict:
             '版式的容量预筛对这些页失效' % (len(empty), len(todo)))
 
     used: dict[str, int] = {}
-    off_candidate = 0
+    fallbacks = 0
     no_material: list[int] = []
     for k in range(0, len(todo), PLAN_BATCH):
         chunk = todo[k:k + PLAN_BATCH]
         log('[plan] 规划第 %d–%d 页（共 %d）…' % (k + 1, k + len(chunk), len(todo)))
         got = _plan_batch([c[1] for c in chunk], src, cfg, used, len(todo))
-        for n, (i, _payload, meta) in enumerate(chunk):
+        for n, (i, payload, meta) in enumerate(chunk):
             sl = got[n] if n < len(got) else None
-            if not isinstance(sl, dict):
-                sl = None
-            elif sl.get('layout') not in meta['candidates']:
-                # 模型挑了候选外的版式。**不能只把 layout 名改掉** ——
-                # 字段是照着另一个版式填的，改名会缺键、渲染时才炸。
-                # 这一页改用确定性生成（字段必然对得上）。
-                log('[plan] 第 %d 页选了候选外的版式 %r，本页改用确定性生成'
-                    % (i + 1, sl.get('layout')))
-                off_candidate += 1
-                sl = None
-            else:
-                why = overflow_reason(sl)
-                if why:
-                    # 条目超容量 → 再渲染就会被 `_fit()` 静默截成残句。
-                    # 这一页改用确定性生成，让内容按版式真正的容量重排。
-                    log('[plan] 第 %d 页（%s）%s，本页改用确定性生成'
-                        % (i + 1, sl.get('layout'), why))
-                    off_candidate += 1
-                    sl = None
+            why = _reject_reason(sl, meta['candidates'])
+            if why:
+                # 模型这一页不合规（候选外版式 / 超容量 / 干脆没返回）。
+                # **先带着原因重问一次**：内容仍是模型的，只是换一种排法。
+                # 早先这里直接改用确定性生成 —— 那等于把模型写的内容整个丢掉、
+                # 拿裸块重算，正是「按字符切出来的残句」的来源。
+                log('[plan] 第 %d 页%s，重问一次' % (i + 1, why))
+                sl = _reask_page(payload, src, cfg, used, len(todo),
+                                 meta['candidates'], why)
+                if sl is None:
+                    fallbacks += 1
+                    log('[plan] 第 %d 页重问后仍不合规，改用确定性生成' % (i + 1))
             if sl is None:
                 sl = _heuristic_slide(meta['page'], meta['section'], meta['blocks'],
                                       candidates=meta['candidates'], taken=used,
@@ -1373,6 +1412,7 @@ def _plan_by_llm(outline: dict, doc: dict, src: str, cfg, log) -> dict:
     # 护栏要在**全部批次都回来之后**跑：相邻判断跨批，批内看不出跨批的重复。
     order = sorted(by_index)
     metas = {i: m for i, _p, m in todo}
+    payloads = {i: p for i, p, _m in todo}
     prev = None
     for i in order:
         sl = by_index[i]
@@ -1380,25 +1420,36 @@ def _plan_by_llm(outline: dict, doc: dict, src: str, cfg, log) -> dict:
             meta = metas.get(i)
             rest = _diversity_alternatives((meta or {}).get('candidates'), prev)
             if meta is not None and rest:
-                # 注意这一页是**整页重做**（`_heuristic_slide`），于是它从
-                # 「模型写的内容」变成「确定性构造的内容」—— 没有素材时就是
-                # 一页只有标题的空白页。日志里那句「改用 X」说的只是版式名。
-                log('[plan] 第 %d 页与上一页同为 %s，改用 %s'
-                    % (i + 1, prev, rest[0]))
-                by_index[i] = _heuristic_slide(
-                    meta['page'], meta['section'], meta['blocks'],
-                    candidates=rest, taken=used, summary=meta['summary'])
-                if not meta['blocks'] and (i + 1) not in no_material:
-                    no_material.append(i + 1)
-                    log('[plan] 第 %d 页改用确定性兜底且没有素材，产出只有标题'
-                        % (i + 1))
+                # **先重问模型**。早先这里直接 `_heuristic_slide`，于是这一页从
+                # 「模型写的内容」变成「拿裸块重算的确定性内容」—— 实测群晖那份
+                # deck 的第 6 页就是这么退化的。重问不成才换。
+                again = _reask_page(
+                    payloads[i], src, cfg, used, len(todo), rest,
+                    '与上一页同为 %s（相邻两页不许同版式）' % prev, banned=(prev,))
+                if again is not None:
+                    log('[plan] 第 %d 页与上一页同为 %s，已重排为 %s'
+                        % (i + 1, prev, again.get('layout')))
+                else:
+                    # 日志打的必须是**实际选中**的版式：早先打的是 `rest[0]`，
+                    # 而 `_heuristic_slide` 之后可能选到另一个（实测日志说
+                    # tinted_bands、页面实际是 timeline_vertical）。
+                    again = _heuristic_slide(
+                        meta['page'], meta['section'], meta['blocks'],
+                        candidates=rest, taken=used, summary=meta['summary'])
+                    log('[plan] 第 %d 页与上一页同为 %s，重问未成，改用确定性生成（%s）'
+                        % (i + 1, prev, again.get('layout')))
+                    if not meta['blocks'] and (i + 1) not in no_material:
+                        no_material.append(i + 1)
+                        log('[plan] 第 %d 页改用确定性兜底且没有素材，产出只有标题'
+                            % (i + 1))
+                by_index[i] = again
         prev = by_index[i].get('layout')
 
     slides = [by_index[i] for i in order]
     plan = _normalise_plan(slides, outline, log)
-    if off_candidate:
-        plan['_warnings'] = ['%d 页的版式不在候选集内，已改用确定性生成'
-                             % off_candidate]
+    if fallbacks:
+        plan['_warnings'] = ['%d 页的模型产物不合规、重问也没成，已改用确定性生成'
+                             % fallbacks]
     return plan
 
 
@@ -1489,16 +1540,111 @@ def _plan_fallback(outline: dict, doc: dict, log=None) -> dict:
     return _normalise_plan(slides, outline, log)
 
 
-_SPLIT_RE = re.compile(r'^(.{2,14}?)\s*[：:，,。；;]\s*(.+)$')
+# 句末标点。`；` 也算 —— 分号两侧各自是完整的命题，在它后面切开不产生残句。
+# `：` **不算**：它是「标签 + 内容在后」的写法，在它后面切正是下面 `_SPLIT_RE` 要的。
+_SENT_END = '。！？；!?;'
+# 句末标点后面可能还跟着右引号 / 右括号（`……版本。”`），它们属于上一句。
+_CLOSERS = '”"』」）》）'
+
+
+def _sentences(text: str) -> list[str]:
+    """把一段正文切成**完整句子**（保留标点与尾随右引号）。切不开就整段一条。
+
+    全仓原先没有分句工具，`_sentence_fit` 是第一个用它的地方。
+    """
+    out, buf, cut = [], '', 0          # cut = buf 里「这一句到哪儿为止」，0 = 没有
+    for ch in (text or '').strip():
+        buf += ch
+        if ch in _SENT_END:
+            cut = len(buf)
+        elif cut and ch in _CLOSERS:
+            cut = len(buf)             # 右引号跟上来，算在这一句里
+        elif cut:
+            out.append(buf[:cut].strip())
+            buf, cut = buf[cut:], 0
+    if buf.strip():
+        out.append(buf.strip())
+    return [s for s in out if s]
+
+
+def _sentence_fit(text: str, budget: int) -> str:
+    """把一段正文**按整句**裁到 `budget` 字以内（保留标点）。
+
+    取最长的完整句子前缀；第一句本身就超预算时**原样返回第一句** —— 宁可让它
+    **可见地**溢出被几何检查报出来（修复回环会去压短），也不要按字符切掉半句。
+    `layouts._fit` 的注释记着那次教训：`node_flow` 的 8 个节点被截成
+    `小红书正文 · 爆款写作…`，而几何报告是全绿的。
+
+    使用点的框都是**折行**的（`statement.body`、`executive_summary.points`），
+    所以「长一点」只是溢出告警，不会静默丢字。
+    """
+    text = (text or '').strip()
+    if len(text) <= budget:
+        return text
+    keep = ''
+    for s in _sentences(text):
+        if keep and len(keep) + len(s) > budget:
+            break
+        keep += s
+        if len(keep) > budget:
+            break                      # 第一句就超了：整句留着，不切
+    return keep or text
+
+
+# 「标签：说明」。**只认源文自带的冒号**，而且标签要短到装得进名称框 ——
+# 版式契约写的是 name ≤8 字，超过 10 字的标签其余五个渲染器会 `_fit` 成残句
+# （`render_numbered_columns` 是唯一不截断的，它会折行、与别的版式表现不一致）。
+# 逗号**不**用来切标题：那正是「从原句里截一段当标题」，而标题本该是**总结**。
+_SPLIT_RE = re.compile(r'^(.{2,10}?)\s*[：:]\s*(.+)$')
 
 
 def _split_item(t: str) -> tuple[str, str]:
-    """把一句正文切成「小标题 + 说明」。切不出来时退化为前 12 字 + 余下。"""
+    """把一个条目切成 `(name, desc)` —— 两个值都可能是空串，**键恒存在**。
+
+    切不出就 `name=''`、整条进 `desc`：
+
+        `Synology Drive 与 DSM 6.2.2 以上版本兼容，支持多种浏览器，包括…`
+          → `('', 'Synology Drive 与 DSM 6.2.2 以上版本兼容，支持多种浏览器，包括…')`
+
+    早先这里的兜底是 `t[:12], t[12:]` —— **按字符数硬切**，于是那条变成
+    标题 `Synology Dri` + 说明 `ve 与 DSM…`，`(Access Control List, ACL)…`
+    变成 `(Access Cont` + `rol List, ACL)…`。
+
+    小标题本来就该是**总结**而不是截取，这件事归模型：`_plan_batch` 的目录契约里
+    逐条写着「name ≤8 字」，标题由模型总结。这里是**没有模型时的兜底**，
+    兜底的义务是**不造残句**，不是硬凑一个标题出来。
+    """
     t = re.sub(r'^[\d①-⑩]{1,2}[\s、.·]+', '', t.strip())
+    # 条目符号也要剥。PDF 路径**不把 `•` 分类成 bullets**，它内联在正文里
+    # （`• 实时同步：在已连接的客户端设备之间…`），不剥就会漏进标题或说明，
+    # 而版式自己已经画了序号。
+    t = t.lstrip(''.join(BULLET_CHARS)).strip()
     m = _SPLIT_RE.match(t)
     if m:
         return m.group(1).strip(), m.group(2).strip()
-    return (t[:12], t[12:].strip()) if len(t) > 14 else (t, '')
+    return '', t
+
+
+def _hard_capped(name: str) -> bool:
+    """这个版式有没有**硬截断上限**（单行定高字段，写长了会被 `_fit()` 静默截断）。"""
+    sp = layout_spec.get(name)
+    return bool(sp is not None and sp.hard_item_chars)
+
+
+def _untitled_count(sl: dict) -> int:
+    """这一页有几条**没有小标题**的条目。
+
+    兜底路径（无模型 / 这一页被护栏换掉）造不出标题，而「页面上为什么没有小标题」
+    在截图里看不出来 —— 所以调用方要把它记进流程日志。
+    """
+    rule = _ITEM_FIELDS.get(sl.get('layout') or '')
+    if not rule or 'name' not in rule[1]:
+        return 0
+    got = sl.get(rule[0])
+    if not isinstance(got, list):
+        return 0
+    return sum(1 for it in got
+               if isinstance(it, dict) and not (it.get('name') or '').strip())
 
 
 # 无模型时**能确定性构造**的版式。别的版式需要模型才有的信息（状态、层级名、
@@ -1554,7 +1700,9 @@ def _title_only(title: str, summary: str = '',
     if layout_spec.is_enabled('statement'):
         sl = dict(layout='statement', lines=[[(title, {'hl': True})]])
         if items:
-            sl['body'] = [[(t[:60], {'size': 16, 'color': 'MUTED'})]
+            # `_sentence_fit` 而不是 `t[:60]`：按**整句**裁，宁可长一点让它可见地
+            # 溢出（`statement.body` 是折行的框），也不要切在半句上。
+            sl['body'] = [[(_sentence_fit(t, 60), {'size': 16, 'color': 'MUTED'})]
                           for t in items[:3]]
         return sl
     if layout_spec.is_enabled('executive_summary'):
@@ -1563,7 +1711,7 @@ def _title_only(title: str, summary: str = '',
         if summary:
             sl['thesis'] = summary
         if items:
-            sl['points'] = [dict(num='%02d' % (k + 1), text=t[:60])
+            sl['points'] = [dict(num='%02d' % (k + 1), text=_sentence_fit(t, 60))
                             for k, t in enumerate(items[:5])]
         return sl
     if layout_spec.is_enabled('tinted_bands'):
@@ -1600,6 +1748,15 @@ def _heuristic_slide(page: dict, section: str, blocks: list[dict], *,
     tbl = tables[0] if tables else None
 
     allowed = [c for c in (candidates or _BUILDABLE) if c in _BUILDABLE]
+    # 声明了**硬截断上限**的版式不参与兜底：那类字段是单行定高的，写长了会被
+    # `_fit()` **静默**截成残句，而兜底路径不做事后容量校验（`overflow_reason`
+    # 只在模型那一路用）。`timeline_vertical` 就是这样：desc 单行 ≈28 汉字。
+    #
+    # 按 `hard_item_chars`（硬边界）筛，**不**按建议值 `item_chars` 筛：建议值
+    # 22–52 对源句 60–120 全都太小，那样筛会把候选筛得只剩 `statement`
+    # （`docs/程序运行逻辑.md` 记着那次）。全文只有 3 个版式声明了硬上限，
+    # 兜底可构造的只有 `timeline_vertical`，所以这里只剔掉它一个。
+    allowed = [c for c in allowed if not _hard_capped(c)]
     if not allowed:
         # 候选里一个「确定性构造得出来」的版式都没有（其余的版式要模型才有的
         # 信息：层级名、图表序列、进度状态……）。此时**不能**退回 statement ——
@@ -1749,6 +1906,15 @@ def _normalise_plan(slides: list[dict], outline: dict, log=None) -> dict:
         clean.append(_fill_header(
             sl, pages[i - 1] if i - 1 < len(pages) else {},
             sections[i - 1] if i - 1 < len(sections) else ''))
+    # 兜底路径**造不出小标题**（`_split_item` 只认源文自带的 `标签：说明`，
+    # 其余一律留空、整条进说明）。而「这一页为什么没有小标题」在截图里看不出来 ——
+    # 只有兜底路径会这样，模型那一路的标题是模型总结的。说出来。
+    untitled = [i for i, sl in enumerate(clean, 1) if _untitled_count(sl)]
+    if untitled and log:
+        log('[plan] 第 %s 页的条目没有小标题（这一页走的是确定性兜底，'
+            '标题只有模型那一路才有）'
+            % '、'.join(str(i) for i in untitled[:8])
+            + ('…共 %d 页' % len(untitled) if len(untitled) > 8 else ''))
     # 目录页的每一行都在这里过一遍 `_toc_line`：前端（`web/app.js`）在用户改动
     # 章节名/页标题时是**本地重拼** toc 的，拼出来的行没有长度上限；而目录页
     # 又在几何检查的 skip 名单里（`qa/geometry.py` 默认跳过第 1/2/最后一页），

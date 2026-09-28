@@ -763,5 +763,242 @@ class TestCustomLayouts(unittest.TestCase):
         self.assertEqual(bad, [], '自定义版式的样例没通过试片闸门：\n' + '\n'.join(bad))
 
 
+# 一整段散文（合并后的 PDF 正文就是这个样子）。兜底路径的素材就是这种。
+PROSE = [
+    '对于经常需要内部或外部协同办公的企业，Drive 的灵活共享方案更能带来优势。',
+    'Drive 与 DSM 上的 Linux 和 Windows 访问控制列表 (Access Control List, '
+    'ACL) 权限规则无缝结合，能为用户设置不同级别的权限。',
+    '拥有读取和 / 或写入权限的用户能同步团队文件夹中的文件。',
+    '组织内部协同办公时，IT 管理员仅须设置用户对指定文件夹的 ACL 读写权限。',
+]
+
+
+def prose_blocks(n: int = 12) -> list[dict]:
+    return [dict(type='para', text=PROSE[i % len(PROSE)]) for i in range(n)]
+
+
+class TestItemSplitting(unittest.TestCase):
+    """`_split_item` / `_sentences` / `_sentence_fit`：**不许按字符数切**。
+
+    实测（群晖那份白皮书，第 6 页）：`_split_item` 的兜底是 `t[:12], t[12:]`，
+    于是 `Synology Drive 与 DSM…` 变成标题 `Synology Dri` + 说明 `ve 与 DSM…`，
+    `(Access Control List, ACL)…` 变成 `(Access Cont` + `rol List, ACL)…`。
+    """
+
+    def test_never_cuts_words(self):
+        for t in ['Synology Drive 与 DSM 6.2.2 以上版本兼容，支持多种浏览器，包括 Firefox。',
+                  '（Access Control List, ACL) 权限规则无缝结合，能为用户设置不同级别的权限。']:
+            name, desc = pipeline._split_item(t)
+            self.assertEqual(name, '', '切不出完整短语就不该造标题：%r' % t)
+            self.assertEqual(desc, t, '整条都该进说明，一个字不丢')
+
+    def test_uses_the_sources_own_label(self):
+        """源文自己写的 `标签：说明` 是**真边界**，照用（冒号前一并剥掉条目符号）。"""
+        self.assertEqual(pipeline._split_item('• 实时同步：在已连接的客户端设备之间。'),
+                         ('实时同步', '在已连接的客户端设备之间。'))
+        self.assertEqual(pipeline._split_item('3. 文件大小：同步的字节数上限。'),
+                         ('文件大小', '同步的字节数上限。'))
+
+    def test_label_too_long_for_the_name_box_is_dropped(self):
+        """标签超过 10 字就不当标题：版式契约是 name ≤8 字，超了会被 `_fit()` 截成残句。"""
+        name, desc = pipeline._split_item(
+            'Synology Drive 管理控制台：专为管理员设计，可监控系统。')
+        self.assertEqual(name, '')
+        self.assertTrue(desc.startswith('Synology Drive 管理控制台：'))
+
+    def test_split_item_always_returns_both_keys(self):
+        """六个渲染器都用 `it['name']` **直接下标** —— 值可以为空串，键不能缺。"""
+        for t in ('', '   ', '一句话。', '标签：说明。'):
+            got = pipeline._split_item(t)
+            self.assertEqual(len(got), 2)
+
+    def test_sentences_keeps_punctuation_and_closers(self):
+        self.assertEqual(pipeline._sentences('你好。世界。'), ['你好。', '世界。'])
+        self.assertEqual(pipeline._sentences('他说：“好。”然后走了。'),
+                         ['他说：“好。”', '然后走了。'])
+        self.assertEqual(pipeline._sentences('没有句末标点的一段话'),
+                         ['没有句末标点的一段话'])
+        self.assertEqual(pipeline._sentences(''), [])
+
+    def test_sentence_fit_trims_by_whole_sentences(self):
+        """按整句裁：留下的是完整的句子；第一句就超预算时**整句留着**。
+
+        宁可让它可见地溢出（修复回环会去压短），也不要切出半句 ——
+        `_fit()` 的静默截断就是这么把 `node_flow` 的 8 个节点变成残句的。
+        """
+        s = '第一句短。第二句也不长。第三句同样短。'
+        self.assertEqual(pipeline._sentence_fit(s, 6), '第一句短。')
+        self.assertEqual(pipeline._sentence_fit(s, 12), '第一句短。第二句也不长。')
+        self.assertEqual(pipeline._sentence_fit(s, 999), s)
+        long_first = '这一句本身就比预算长得多，不可能只靠丢尾巴放进来。'
+        self.assertEqual(pipeline._sentence_fit(long_first, 5), long_first)
+
+
+class TestFallbackNeverInventsTitles(unittest.TestCase):
+    """兜底路径（无模型 / 这一页被护栏换掉）的义务是**不造残句**。
+
+    小标题本来就该是**总结**而不是截取，那件事归模型（`_plan_batch` 的目录契约里
+    逐条写着 name ≤8 字）。这里只保证：切不出来就留空、整条进说明，
+    而且不会选到「单行定高、会被静默截断」的版式。
+    """
+
+    PAGE = dict(title='团队协作、跨设备同步与备份')
+
+    def slide(self, cands, n=12):
+        return pipeline._heuristic_slide(self.PAGE, '03 企业生产力提升',
+                                         prose_blocks(n), candidates=cands,
+                                         taken={}, summary='一句话概括。')
+
+    def test_titles_are_left_empty_not_cut(self):
+        sl = self.slide(['numbered_columns'])
+        items = sl['items']
+        self.assertTrue(items)
+        for it in items:
+            self.assertEqual(it['name'], '')
+            self.assertIn(it['desc'], [b['text'] for b in prose_blocks(12)])
+
+    def test_hard_capped_layouts_are_never_chosen(self):
+        """`timeline_vertical` 的 desc 是**单行**定高（≈28 汉字），长句进去会被
+        `_fit()` 静默截成残句，而兜底路径**不做事后容量校验**。所以它不参与兜底。
+
+        这条只按声明的**硬边界**（`max_item_chars`）筛，不按建议值 `item_chars` ——
+        后者会把候选筛得只剩 `statement`（`docs/程序运行逻辑.md` 记着那次）。
+        """
+        self.assertTrue(layout_spec.get('timeline_vertical').hard_item_chars)
+        for _ in range(10):          # `pick` 按用量摊平，不是固定顺序
+            sl = self.slide(['timeline_vertical', 'numbered_columns'], n=12)
+            self.assertNotEqual(sl['layout'], 'timeline_vertical')
+            self.assertTrue(sl['layout'] in ('numbered_columns', 'tinted_bands'))
+
+    def test_fallback_plan_renders_without_truncation(self):
+        """兜底产出的每一页过 build + 几何：**零 error、零 `…` 静默截断**。
+
+        溢出（warn）是允许的 —— 整段散文塞进为短条目设计的格子本来就装不下，
+        而溢出是**可见**的（几何检查会报、修复回环会去压短）。静默截断不是：
+        它让文字不再溢出，于是报告全绿而页面上是残句。
+        """
+        tpl = _template()
+        if tpl is None:
+            raise unittest.SkipTest('模板文件不存在，跳过渲染回归')
+        slides = []
+        for i, cand in enumerate(['numbered_columns', 'tinted_bands', 'quadrant',
+                                  'split_main_aside', 'process_chain',
+                                  'timeline_vertical', 'statement']):
+            sl = self.slide([cand], n=4 + i)
+            sl.update(page=i + 3, kicker='01 测试章', title='测试页 %d' % (i + 1))
+            slides.append(sl)
+        tmp = tempfile.mkdtemp(prefix='pptgen-fallback-')
+        path = os.path.join(tmp, 'fallback.pptx')
+        tokens.TRUNCATIONS.clear()
+        build.build(dict(slides=slides, toc=['01 测试章']), tpl, path)
+        self.assertEqual([], list(tokens.TRUNCATIONS),
+                         '兜底路径出现了 `_fit()` 静默截断：%s' % tokens.TRUNCATIONS)
+        rep = geometry.analyse(path)
+        errs = [i for i in rep['issues'] if i['severity'] == 'error']
+        self.assertEqual([], errs, geometry.format_report(rep))
+
+
+class TestReaskBeforeFallback(unittest.TestCase):
+    """模型产物不合规时，**先带着原因重问一次**，不是直接落兜底。
+
+    落兜底等于把模型刚写的内容丢掉、拿裸块重算（`_heuristic_slide`）——
+    实测群晖那份 deck 的第 6 页就是这么从模型产物退化成残句的。
+    """
+
+    GOOD = dict(layout='tinted_bands',
+                bands=[dict(name='业务连续性', desc='一句话说明。')])
+
+    def stub(self, seq, calls):
+        def fake(chunk, src, cfg, used, total, *, notes=''):
+            calls.append(notes)
+            return [seq.pop(0)]
+        return fake
+
+    def test_second_answer_is_used_and_reason_is_fed_back(self):
+        calls = []
+        bad = dict(layout='timeline_vertical', steps=[dict(name='x', desc='y')])
+        with mock.patch.object(pipeline, '_plan_batch',
+                               self.stub([bad, self.GOOD], calls)):
+            got = pipeline._reask_page(dict(candidates=['tinted_bands']), 'src',
+                                       None, {}, 3, ['tinted_bands'],
+                                       '选了候选外的版式')
+        self.assertEqual(got, self.GOOD)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('不合规', calls[0])
+        self.assertIn('仍然不合规', calls[1])       # 上一次的原因要喂回去
+
+    def test_gives_up_after_two_attempts(self):
+        calls = []
+        bad = dict(layout='statement', lines=[])
+        with mock.patch.object(pipeline, '_plan_batch',
+                               self.stub([bad, bad], calls)):
+            self.assertIsNone(pipeline._reask_page(
+                dict(candidates=['tinted_bands']), 'src', None, {}, 3,
+                ['tinted_bands'], '选了候选外的版式'))
+        self.assertEqual(len(calls), 2)
+
+    def test_model_unavailable_falls_through_quietly(self):
+        def boom(*a, **k):
+            raise pipeline.llm.LLMError('连不上')
+        with mock.patch.object(pipeline, '_plan_batch', boom):
+            self.assertIsNone(pipeline._reask_page(
+                dict(candidates=['tinted_bands']), 'src', None, {}, 3,
+                ['tinted_bands'], '理由'))
+
+    def test_no_candidates_means_no_call(self):
+        with mock.patch.object(pipeline, '_plan_batch',
+                               mock.Mock(side_effect=AssertionError('不该调'))):
+            self.assertIsNone(pipeline._reask_page(
+                dict(candidates=[]), 'src', None, {}, 3, [], '理由'))
+
+    def test_adjacent_duplicate_keeps_the_models_content(self):
+        """整条 `_plan_by_llm` 走一遍：相邻同版式时**重问**，内容仍是模型的。
+
+        实测群晖那份 deck 的第 6 页就是在这里退化的：护栏直接 `_heuristic_slide`，
+        页面从「模型写的内容」变成「拿裸块重算」的产物（按字符切的残句）。
+        """
+        pages = [dict(title='页一', intent='enumeration', anchor='', hint=''),
+                 dict(title='页二', intent='enumeration', anchor='', hint='')]
+        outline = dict(title='T', page_count=2, toc=[], sections=[
+            dict(name='01 一章', summary='概括。', pages=pages)])
+        # 两页各自 4 段正文 → 两页的候选集相同，护栏才有可能「相邻同版式」
+        blocks = []
+        for slide, tag in ((1, '甲'), (2, '乙')):
+            blocks.append(dict(type='heading', level=1, text='页%d' % slide,
+                               slide=slide))
+            blocks += [dict(type='para', text='%s正文第 %d 段。' % (tag, i),
+                            slide=slide) for i in range(4)]
+        doc = dict(kind='pptx', blocks=blocks)
+
+        def spec(layout, tag):
+            return dict(layout=layout, title='页二', kicker='01 一章',
+                        bands=[dict(name=tag, desc='说明。')],
+                        items=[dict(name=tag, desc='说明。')])
+
+        # `calls` 是桩自己的计数，`logs` 收 pipeline 的日志 —— **两个列表不能共用**，
+        # 否则 pipeline 的每一行都会让桩以为「已经不是第一批了」。
+        calls, logs, got_layout = [], [], []
+
+        def fake(chunk, src, cfg, used, total, *, notes=''):
+            cands = chunk[0]['candidates']
+            calls.append(notes)
+            if len(calls) == 1:                # 第一批：两页都写成同一个版式
+                return [spec('tinted_bands', '模型一'), spec('tinted_bands', '模型二')]
+            alt = next(c for c in cands if c != 'tinted_bands')
+            got_layout.append(alt)
+            return [spec(alt, '模型二')]
+
+        with mock.patch.object(pipeline, '_plan_batch', fake):
+            plan = pipeline._plan_by_llm(outline, doc, 'src', None, logs.append)
+
+        self.assertEqual(len(calls), 2, '护栏应当重问一次，而不是直接落兜底')
+        self.assertEqual(plan['slides'][1]['layout'], got_layout[0])
+        self.assertNotEqual(plan['slides'][1]['layout'], 'tinted_bands')
+        # 关键：内容是**模型写的**，不是 `_heuristic_slide` 拿裸块重算的
+        names = [it['name'] for it in plan['slides'][1]['items']]
+        self.assertEqual(names, ['模型二'])
+        self.assertTrue(any('重排' in m for m in logs), logs)
+
+
 if __name__ == '__main__':
     unittest.main()
