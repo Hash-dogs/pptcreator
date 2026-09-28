@@ -417,6 +417,92 @@ class TestPatternLevel(unittest.TestCase):
         self.assertIsNone(parse._pdf_size_level(0.02, 0.0))
 
 
+class TestWrappedLines(unittest.TestCase):
+    """PDF 的**硬换行**要接回完整句子。
+
+    实测（`out/uploads/群晖科技_Synology_Drive_WP_chs.pdf`）：正文每行 30–60 字，
+    一句话被排版切成几行、甚至切在词中间。`_clean` 原先的判据是「上一块累加后
+    短于 40 字」—— 对这种行几乎从不触发，于是 **232 个 `para` 里 186 个（80%）
+    以半句结尾**，一路漏到版式里变成 `Synology Dri` / `ve 与 DSM…` 这样的残句。
+    """
+
+    def clean(self, lines: list[str], kind: str = 'pdf', slide: int = 1) -> list[str]:
+        blocks = [dict(type='para', text=t, slide=slide) for t in lines]
+        return [b['text'] for b in parse._clean(blocks, kind)]
+
+    def test_join_wrapped_only_spaces_at_latin_boundaries(self):
+        """中文直接拼；中英边界补空格；拉丁小写开头是**断词**，不能补。"""
+        self.assertEqual(parse._join_wrapped('…支持多种浏览器，包', '括 Firefox'), '…支持多种浏览器，包括 Firefox')
+        self.assertEqual(parse._join_wrapped('…。Synology Drive', '提供了丰富的功能'), '…。Synology Drive 提供了丰富的功能')
+        self.assertEqual(parse._join_wrapped('Synology Dri', 've 与 DSM'), 'Synology Drive 与 DSM')
+
+    def test_hard_wrapped_lines_become_one_sentence(self):
+        got = self.clean([
+            'Synology Drive 与 DSM 6.2.2 以上版本兼容，支持多种浏览器，包',
+            '括 Firefox、 Chrome、 Safari、 IE 10 及以上版本。',
+        ])
+        self.assertEqual(got, ['Synology Drive 与 DSM 6.2.2 以上版本兼容，'
+                               '支持多种浏览器，包括 Firefox、 Chrome、 Safari、'
+                               ' IE 10 及以上版本。'])
+
+    def test_merge_stops_at_a_sentence_end(self):
+        """句末标点就是边界 —— 下一条是**新的一句**，不该粘上去。"""
+        got = self.clean(['第一句说完了。', '第二句另起。'])
+        self.assertEqual(got, ['第一句说完了。', '第二句另起。'])
+
+    def test_a_new_unit_is_never_absorbed(self):
+        """条目符号 / 题注 / 编号项是**新单元**，不接上一行。"""
+        got = self.clean(['下面这些是主要能力：', '• 实时同步', '• 权限管控'])
+        self.assertEqual(got, ['下面这些是主要能力：', '• 实时同步', '• 权限管控'])
+        got = self.clean(['正文一句话没有句号', '图 1：套件架构'])
+        self.assertEqual(got, ['正文一句话没有句号', '图 1：套件架构'])
+        got = self.clean(['正文一句话没有句号', '3. 文件大小'])
+        self.assertEqual(got, ['正文一句话没有句号', '3. 文件大小'])
+
+    def test_never_merges_across_pages(self):
+        """跨页不接：`merged` 会继承上一页的 `slide`，内容会算进前一页。
+
+        PDF 页与页之间只靠 heading 分隔，某页最后一段与下一页第一段是**相邻块** ——
+        而 `structure._assemble` 的 front_matter 是纯 `slide` 判据。
+        """
+        blocks = [dict(type='para', text='这一页最后一句没有句号', slide=1),
+                  dict(type='para', text='而这一行看起来像续行', slide=2)]
+        got = [b['text'] for b in parse._clean(blocks, 'pdf')]
+        self.assertEqual(got, ['这一页最后一句没有句号', '而这一行看起来像续行'])
+
+    def test_non_pdf_kinds_are_left_alone(self):
+        """pptx / docx / txt 的 `para` 本来就是真段落，合并它们是有害的。
+
+        pptx 的 `rest` 是按**字号降序**排的（不是阅读顺序），合并会把不相关的
+        两段无间隔粘起来；docx 的相邻短段落会被整段吃掉。
+        """
+        lines = ['短段落一', '短段落二', '第三段']
+        for kind in ('pptx', 'docx', 'text'):
+            self.assertEqual(self.clean(lines, kind), lines, kind)
+
+    def test_pdf_end_to_end(self):
+        """整条路走一遍：手写 PDF 里被切在词中间的两行，合成一个完整句。"""
+        pages = [
+            [(HEADER, 9), ('1', 9), ('软件架构', 20),
+             ('Synology Drive 与 DSM 6.2.2 以上版本兼容，支持多种浏览器，包', 11),
+             ('括 Firefox、 Chrome、 Safari、 IE 10 及以上版本。', 11)],
+            [(HEADER, 9), ('2', 9), ('共享', 20),
+             ('管理员可通过控', 11),
+             ('制台，监控 Synology Drive 系统。', 11)],
+            [(HEADER, 9), ('3', 9), ('安全', 20),
+             ('正文一句没有句号', 11)],
+        ]
+        doc = parse_pdf(pages, bookmarks=())
+        joined = '\n'.join(b['text'] for b in doc['blocks'])
+        # 用「包含」而不是相等：中文走 Identity-H 时字盒量不出高度（夹具的已知
+        # 特性，见 `build_pdf` 的说明），所以 20pt 的 `软件架构` 升不成 heading、
+        # 会被一起接上。这条用例要盯的是**接缝**：
+        # `包` + `括 Firefox` 与 `控` + `制台` 必须合上，且中间不插空格。
+        self.assertIn('支持多种浏览器，包括 Firefox、 Chrome、 Safari、'
+                      ' IE 10 及以上版本。', joined)
+        self.assertIn('管理员可通过控制台，监控 Synology Drive 系统。', joined)
+
+
 class TestDlpGuard(unittest.TestCase):
     """加密头仍然要被拦住（和 pdf 解析同一条入口）。"""
 

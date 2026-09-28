@@ -211,6 +211,25 @@ class TestDocxStructure(unittest.TestCase):
         self.assertEqual([c['name'] for c in sk['chapters']],
                          ['第一章 产品概述', '第二章 技术架构'])
 
+    def test_adjacent_short_paragraphs_are_not_merged(self):
+        """docx 的 `para` 是**真段落**，两个相邻短段落不许被粘成一段。
+
+        `_clean` 原先对**所有格式**都合并「上一块累加后 < 40 字」的相邻段落。
+        这份夹具每段之间都有 heading，所以那条规则在 docx 上从未被测到 ——
+        而它会把「谢谢。」「备注：……」这样的连续短段整段吃掉。合并只该对 PDF
+        的排版换行生效（判据也换成了「上一行没有句末标点」，见 `_WrappedLines`）。
+        """
+        import docx                                    # python-docx
+        d = docx.Document()
+        d.add_heading('第一章 总则', level=1)
+        d.add_paragraph('谢谢。')
+        d.add_paragraph('备注：下同。')
+        buf = io.BytesIO()
+        d.save(buf)
+        texts = [b['text'] for b in parse.parse_bytes(
+            buf.getvalue(), '夹具.docx')['blocks'] if b['type'] == 'para']
+        self.assertEqual(texts, ['谢谢。', '备注：下同。'])
+
 
 class TestCompression(unittest.TestCase):
     """超页数时**保章压页**：章节一个不少。"""

@@ -83,9 +83,9 @@ def _dispatch(src, name: str, ext: str) -> dict:
         doc = _parse_text(src, name)
     else:
         raise ValueError('不支持的格式 %s；支持：%s' % (ext, ' / '.join(SUPPORTED)))
-    blocks = _clean(doc['blocks'])
+    blocks = _clean(doc['blocks'], doc.get('kind', ''))
     doc['blocks'] = blocks
-    # 骨架在 `_clean` **之后**算：块的下标会被 `_clean` 改动（合并短段、
+    # 骨架在 `_clean` **之后**算：块的下标会被 `_clean` 改动（合并换行行、
     # 丢页码），在下标定下来之前算出来的区间是错的。
     # `outline` 只有 PDF 有（`/Outlines` 书签树），是比版面推断更硬的章节信号，
     # 所以单独传给骨架层，而不是塞进块流里。
@@ -134,6 +134,32 @@ _KICKER_RE = re.compile(r'^(\d{1,2})\s*[、.·]?\s+(\S.*)$')
 # 实测本 deck：标题中位 29pt → 阈值 64pt；分隔页 120pt 通过，
 # 封面 52pt / 封底 40pt / 正文 29–36pt 全部不通过，余量很大。
 _DIVIDER_RATIO = 2.2
+
+# ── 排版换行的接续（只用于 PDF，见 `_clean`）────────────────────
+# PDF 是**硬换行**的：一句正文会被排版切成 30–60 字的若干行，于是
+# `…支持多种浏览器，包` | `括 Firefox、…`、`…可通过控` | `制台，…`。
+# 下面这组判据把它们接回完整句子。
+#
+# 句末标点**只用于判断「这一行说完了没有」**，所以不收 `，、：` 这些句内停顿
+# （`1. 定义：` 正是「标签 + 内容在后」的写法，句中的 `：` 不代表说完）。
+# 与 `_enum_ok` 那份内联元组**刻意分开**：那里问的是「这行够短、不像句子，
+# 所以可能是标题」，把 `；` 加进去会放宽标题识别，是另一回事。
+_SENT_END = '。！？；!?;'
+
+# 句末标点后面可能还跟着右引号 / 右括号（`……版本。”`），它们也是句子收尾。
+_CLOSERS = '”"』」）》）'
+
+# 条目符号。三个解析器各有一份自己的判据（`_parse_pptx` 认 `•-·▪`、
+# `_parse_docx` 认 `•-·`、`_parse_text` 认 `[-*+•·]` 且要求后面跟空格，互不一致）——
+# **本判据只用这一份，不动那三处**：改它们是在改另外三条路径的行为。
+# 公开名：`pipeline._split_item` 也要用它剥掉条目开头的符号（PDF 路径不把 `•`
+# 分类成 bullets，它内联在正文里，不剥就会漏进标题）。
+BULLET_CHARS = ('•', '·', '▪', '◦', '-')
+
+# 题注（`图 1：…`、`表 3 举例说明了…`）是**新单元**，不是上一句的续行。
+# 不要求冒号：实测有 `表 1 举例说明了如何检查选择性同步规则：…` 这种写法，
+# 它紧跟在一条编号项后面，被当成续行就会拼出一个「列表项 + 题注」的混合块。
+_CAPTION_RE = re.compile(r'^\s*[图表]\s*\d+')
 
 
 def _slide_items(slide):
@@ -753,8 +779,79 @@ def _parse_text(src, name: str) -> dict:
 
 
 # ── 清理 ──────────────────────────────────────────────────────
-def _clean(blocks: list[dict]) -> list[dict]:
-    """去页眉页脚重复、去纯页码、合并相邻同类块。"""
+def _join_wrapped(a: str, b: str) -> str:
+    """把被排版换行切断的两行接回一句。
+
+    中文之间直接拼是对的（`包` + `括 Firefox` → `包括 Firefox`），但**中英边界**
+    要补一个空格（`…。Synology Drive` + `提供了…`）。反过来，「拉丁字母结尾 +
+    小写字母开头」是**断词**（`Synology Dri` + `ve`），补空格反而切错。
+    """
+    if not a:
+        return b
+    if not b:
+        return a
+    x, y = a[-1], b[0]
+    if x.isascii() and x.isalnum() and not (y.isascii() and y.islower()):
+        return a + ' ' + b
+    return a + b
+
+
+def _sentence_done(t: str) -> bool:
+    """这一行说完了吗（以句末标点收尾，容许后面跟一个右引号 / 右括号）。"""
+    return t.rstrip().rstrip(_CLOSERS).rstrip().endswith(tuple(_SENT_END))
+
+
+def _starts_unit(t: str) -> bool:
+    """这一行是**新单元**的开头吗（而不是上一行的续行）。
+
+    条目符号在 `_parse_pdf` 里**不分类** —— `• Synology Drive Server 是…` 就是一个
+    普通 `para`，`•` 原样留在文本里。编号项同理；`_pdf_pattern_level` 手上就有那套
+    阶梯（还带 `_enum_ok` 的长度与结尾护栏），直接复用，别另写一份：
+    `6.2.2 以上版本兼容…` 这种续行会被它判成 None（超过 `_PDF_HEAD_MAX`），
+    于是照常接回去。
+    """
+    s = t.lstrip()
+    if s[:1] in BULLET_CHARS:
+        return True
+    if _CAPTION_RE.match(s):
+        return True
+    return _pdf_pattern_level(s) is not None
+
+
+def _is_wrapped_continuation(out: list[dict], b: dict, kind: str) -> bool:
+    """`b` 是不是上一块被**排版换行**切断的续行。
+
+    ⚠️ 已知边界：一条**短条目行**（`3. 文件大小`）不以句末标点收尾，会把下一段的
+    首行吸进来。实测群晖那份白皮书里只此一例（134 个 para 块），代价是那一段变长、
+    文本仍完整 —— 而「看到短行就不接」的护栏会把**真正的**续行漏掉，那是这个函数
+    要修的 bug 本身。所以这里只认标点，不认长度。
+    """
+    if kind != 'pdf':
+        # 只有 PDF 的 `para` 是排版行。pptx / docx 产出的本来就是真段落，
+        # txt 是一行一句 —— 对它们合并是有害的：pptx 的 `rest` 是按**字号降序**
+        # 排的（`_pick_title` 的 `ordered`，不是阅读顺序），合并会把不相关的
+        # 两段无分隔符粘起来；docx 的相邻短段落会被整段吃掉。
+        return False
+    if not out or out[-1]['type'] != 'para':
+        return False
+    if out[-1].get('slide') != b.get('slide'):
+        # 跨 PDF 页不接：页与页之间只靠 heading 分隔，合并后 `merged` 会继承
+        # **上一页**的 `slide`，而 `structure._assemble` 的 front_matter 是纯
+        # `slide` 判据 —— 下一页开头的内容会被算进上一页。
+        return False
+    if _starts_unit(b['text']):
+        return False
+    return not _sentence_done(out[-1]['text'])
+
+
+def _clean(blocks: list[dict], kind: str = '') -> list[dict]:
+    """去页眉页脚重复、去纯页码、把被排版换行切断的句子接回去。
+
+    合并的判据是「**上一行没有以句末标点收尾**」，不是「上一行够不够短」。
+    早先这里看的是「上一块累加后 < 40 字」，两个方向都错：PDF 的行普遍 40+ 字，
+    于是几乎从不触发（实测群晖那份白皮书：232 个 `para` 里 **186 个（80%）
+    以半句结尾**）；而 pptx / docx 的真段落反倒会被误粘（见 `_is_wrapped_continuation`）。
+    """
     out = []
     seen_head = {}
     for b in blocks:
@@ -773,12 +870,11 @@ def _clean(blocks: list[dict]) -> list[dict]:
                 continue
             if len(t) < 2:
                 continue
-            if out and out[-1]['type'] == 'para' and len(out[-1]['text']) < 40:
-                # 合并被切断的句子。**要带上原块的其他键**（slide 等）——
-                # 早先这里重建 dict 只留 type/text，把页码归属悄悄丢了，
-                # 下游按区间取内容就会错位。
+            if _is_wrapped_continuation(out, b, kind):
+                # **要带上原块的其他键**（slide 等）—— 早先这里重建 dict 只留
+                # type/text，把页码归属悄悄丢了，下游按区间取内容就会错位。
                 merged = dict(out[-1])
-                merged['text'] = merged['text'] + t
+                merged['text'] = _join_wrapped(merged['text'], t)
                 out[-1] = merged
                 continue
         if b['type'] == 'bullets' and not b['items']:
