@@ -290,6 +290,82 @@ class TestServerPathHelpers(_Base):
             self.assertEqual(s._stem_of('out/plans/' + path), 'x', path)
         self.assertEqual(s._stem_of('out/plans/plain.json'), 'plain')
 
+    def test_source_paths_finds_parsed_json_under_another_name(self):
+        """deck 名 != 源文档名时，`<deck>.parsed.json` 根本不存在。
+
+        实测（2026-09-24 群晖科技那份）：源文档名 26 字被前端截到 24 字
+        （`web/app.js:338`），deck 落成 `…_WP_c.deck.json`，解析产物却叫
+        `…_WP_chs.parsed.json`。按同名去找就是 FileNotFoundError ——
+        文件明明在磁盘上，报的却是「没有这个文件」，把人往错方向指。
+        """
+        s = self.server
+        tag = '_probe_sp_'
+        deck, source = tag + 'c', tag + 'chs'      # 截断后的 deck 名 / 源文档名
+        run_dir = os.path.join(s.PLANS, tag + 'run')
+        parsed = os.path.join(s.PLANS, source + '.parsed.json')
+        outline = os.path.join(s.PLANS, source + '.outline.json')
+        side = os.path.join(s.PLANS, deck + '.run.json')
+
+        def put(path, data):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False)
+
+        put(parsed, {'stats': {}})
+        put(outline, {'page_count': 1})
+        try:
+            # ① 同名的一份在 → 就是它（本次改动之前的老产物只剩这条路）
+            self.assertEqual(s._source_paths(source), (outline, parsed))
+
+            # ② deck 名下的 sidecar 记着源产物的路径（`run_generate` 写的那条）
+            put(side, {'run_dir': run_dir, 'parsed_path': parsed,
+                       'outline_path': outline})
+            self.assertEqual(s._source_paths(deck), (outline, parsed))
+
+            # ③ 老 sidecar 里没有 `parsed_path` → 退到那次流程的 `run.json`，
+            #    `document.parsed_json` 记着同一个答案
+            put(side, {'run_dir': run_dir})
+            put(os.path.join(run_dir, 'run.json'),
+                {'document': {'parsed_json': parsed}})
+            self.assertEqual(s._source_paths(deck), (outline, parsed))
+
+            # 都不中时返回「该在的位置」而不是抛：调用方是延迟加载，
+            # 只改封面/目录的请求不该因为正文页的原文缺失而失败
+            self.assertEqual(s._source_paths(tag + 'nope'),
+                             (os.path.join(s.PLANS, tag + 'nope.outline.json'),
+                              os.path.join(s.PLANS, tag + 'nope.parsed.json')))
+        finally:
+            for p in (parsed, outline, side,
+                      os.path.join(run_dir, 'run.json')):
+                if os.path.isfile(p):
+                    os.remove(p)
+            if os.path.isdir(run_dir):
+                os.rmdir(run_dir)
+
+    def test_write_sidecar_merges_instead_of_clobbering(self):
+        """两个 stem 写的是同一个文件（deck 名 == 源名时），后写的别把 `source` 冲掉。
+
+        `run_outline` 只知道源文档，`run_generate` 只知道源产物的路径 ——
+        各写一半，合并才不会让先写的那半凭空消失。
+        """
+        s = self.server
+        tag = '_probe_ws_'
+        side = os.path.join(s.PLANS, tag + '.run.json')
+        rl = runlog.RunLog(tag, root=self.root, origin='web', command='outline')
+        self.addCleanup(lambda: rl.finish(ok=True))
+        try:
+            s._write_sidecar(tag, rl, 'src.pdf', 'upload', '源文档')
+            s._write_sidecar(tag, rl, parsed_path='p.json', outline_path='o.json')
+            with open(side, encoding='utf-8') as f:
+                got = json.load(f)
+            self.assertEqual(got['source']['name'], '源文档')
+            self.assertEqual(got['parsed_path'], 'p.json')
+            self.assertEqual(got['outline_path'], 'o.json')
+            self.assertEqual(got['run_dir'], rl.dir)
+        finally:
+            if os.path.isfile(side):
+                os.remove(side)
+
     def test_preview_stamp_tracks_render_recipe(self):
         """指纹里必须带渲染配方，否则改了分辨率旧图不会重渲。
 

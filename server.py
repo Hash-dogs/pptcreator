@@ -343,6 +343,14 @@ def run_generate(jid: str, outline: dict, parsed_path: str, name: str, rounds: i
             # 流程日志是它唯一的幸存地。
             runlog.attach_file('confirmed_outline', _write_confirmed_outline(outline, name))
             runlog.attach_pptx(pptx)
+            # 把「这份 deck 的原文是哪一份」记在**输出文件名**下 —— 这是按页修订
+            # 唯一的线索：它只拿得到 deck 的路径，而 `<name>.parsed.json` 在用户
+            # 改过输出名（前端还会把源名截到 24 字）时并不存在，解析产物在
+            # **源文档名**下。没有这一笔，`_source_paths` 只能按名字猜，猜不中
+            # 就是 FileNotFoundError。
+            _write_sidecar(name, runlog, parsed_path=parsed_path,
+                           outline_path=os.path.join(
+                               PLANS, _stem_of(parsed_path) + '.outline.json'))
 
         with runlog.stage('render') as st:
             work = os.path.join(VISUAL, name)
@@ -476,12 +484,13 @@ def run_revise(jid: str, deck_arg: str, mode: str, text: str):
 
         by_preview = {e['preview']: e for e in index}
         if mode == 'rewrite':
-            outline = pipeline.load_json(
-                os.path.join(PLANS, stem + '.outline.json'))
+            # 这两份**未必**叫 `<deck 名>.{outline,parsed}.json`（见 `_source_paths`）。
+            outline_path, doc_path = _source_paths(stem)
+            outline = pipeline.load_json(outline_path)
             # `.parsed.json` 只有**正文页**重做要用（`redo_slide` 按锚点回原文取
             # 条目）；封面/目录的重做只看大纲。延迟加载：那份文件缺失或改名时，
             # 「只改封面」这种请求不该跟着一起失败。
-            doc = _lazy_json(os.path.join(PLANS, stem + '.parsed.json'))
+            doc = _lazy_json(doc_path)
 
             items = []
             cap = revise_mod.max_rewrite_pages()
@@ -601,8 +610,10 @@ def run_apply(jid: str, deck_arg: str, mode: str, items: list, sha: str = '',
             # 这两份只有**正文页**重做要用（`redo_slide` 按 `slides[]` 的下标回原文
             # 取条目）；封面/目录的重做只看 deck 本身。延迟加载：它们缺失或改名时，
             # 「只改封面」这种请求不该跟着一起失败。
-            get_outline = _lazy_json(os.path.join(PLANS, stem + '.outline.json'))
-            doc = _lazy_json(os.path.join(PLANS, stem + '.parsed.json'))
+            # 同样**未必**叫 `<deck 名>.{outline,parsed}.json`（见 `_source_paths`）。
+            outline_path, doc_path = _source_paths(stem)
+            get_outline = _lazy_json(outline_path)
+            doc = _lazy_json(doc_path)
 
             out_deck = copy.deepcopy(deck)
             changed = []
@@ -1115,7 +1126,10 @@ def run_outline(jid: str, src: str, data: bytes | None = None,
                         chapter_names=[s['name'] for s in outline.get('sections') or []],
                         warnings=om.get('warnings') or [])
             runlog.attach_file('outline_json', outline_path)
-        _write_sidecar(stem, runlog, src, source_origin, name)
+        # `parsed_path` / `outline_path` 一并记下：解析产物写在这条 stem 下，
+        # 而 deck 走的可能是另一个名字（见 `_source_paths`）。
+        _write_sidecar(stem, runlog, src, source_origin, name,
+                       parsed_path=parsed_path, outline_path=outline_path)
         meta = outline.get('_meta') or {}
         if meta.get('generated_by') == 'llm':
             _log(jid, '大纲完成：%d 页正文（%d 章）'
@@ -1152,14 +1166,38 @@ def _sidecar_path(stem: str) -> str:
     return os.path.join(PLANS, stem + '.run.json')
 
 
-def _write_sidecar(stem: str, runlog, src: str, origin: str, name: str):
+def _write_sidecar(stem: str, runlog, src: str = '', origin: str = '',
+                   name: str = '', parsed_path: str = '', outline_path: str = ''):
+    """把「这个名字属于哪一次流程、它的源产物是谁」写进 `out/plans/<stem>.run.json`。
+
+    **两个 stem 都会写**：`run_outline` 按**源文档名**写（流程的起点在这儿，源文件
+    也归档在这儿），`run_generate` 按**输出文件名**写。用户改过输出名时两者不等，
+    而 deck 身上只带着后者 —— 「这份 deck 的原文是哪一份」就只能靠输出名那条记下来
+    （否则 `_source_paths` 只能按名字去猜，猜不中就是 FileNotFoundError）。
+
+    **合并写**，不是覆盖：两个调用点各自只知道一半（`source` 只有大纲那次知道），
+    而它们是同一个文件。写不进去不中断流程，只影响「接不接得上原流程」。
+    """
+    path = _sidecar_path(stem)
+    payload: dict = {}
+    if os.path.isfile(path):
+        try:
+            got = pipeline.load_json(path)
+            if isinstance(got, dict):
+                payload.update(got)
+        except (ValueError, OSError) as e:
+            print('  [warn] 旧 sidecar 读不了（按空的续写）：%s' % e)
+    payload.update({'run_dir': runlog.dir,
+                    'started_at': runlog.started.isoformat(timespec='seconds')})
+    if src or origin or name:
+        payload['source'] = {'path': src, 'name': name, 'origin': origin}
+    if parsed_path:
+        payload['parsed_path'] = parsed_path
+    if outline_path:
+        payload['outline_path'] = outline_path
     try:
-        pipeline.save_json({'run_dir': runlog.dir, 'started_at':
-                            runlog.started.isoformat(timespec='seconds'),
-                            'source': {'path': src, 'name': name, 'origin': origin}},
-                           _sidecar_path(stem))
+        pipeline.save_json(payload, path)
     except Exception as e:
-        # 写不了 sidecar 只影响「两次请求能不能并到一个文件夹」，不该中断流程
         print('  [warn] 写 sidecar 失败：%s' % e)
 
 
@@ -1195,6 +1233,65 @@ def _read_sidecar(parsed_path: str) -> dict | None:
         return pipeline.load_json(path)
     except ValueError:
         return None
+
+
+def _first_file(*cands) -> str:
+    """第一个存在的候选；都不在就返回**最后一个**。
+
+    最后一个的约定是「该在的位置」—— 调用方要的不是 None，而是一个能写进错误
+    信息、也能拿去拼日志的路径。
+    """
+    for p in cands[:-1]:
+        if isinstance(p, str) and p and os.path.isfile(p):
+            return p
+    return cands[-1] if cands else ''
+
+
+def _parsed_from_run_dir(run_dir) -> str:
+    """那次流程的 `run.json` 里 `document.parsed_json` 记的路径。"""
+    if not isinstance(run_dir, str) or not run_dir:
+        return ''
+    try:
+        got = pipeline.load_json(os.path.join(run_dir, 'run.json'))
+    except (ValueError, OSError):
+        return ''
+    doc = got.get('document') if isinstance(got, dict) else None
+    p = doc.get('parsed_json') if isinstance(doc, dict) else None
+    return p if isinstance(p, str) else ''
+
+
+def _source_paths(stem: str) -> tuple[str, str]:
+    """这份 deck 的 `(outline.json, parsed.json)` —— 源产物**实际**叫什么名字。
+
+    不能拼 `<stem>.parsed.json` 了事。`stem` 是 deck 的名字，来自前端的
+    「输出文件名」（`web/app.js:338` 把源文档名截到 24 字，用户还能随手改），
+    而解析产物写在**源文档名**下（`run_outline` 的 `stem`，截到 40 字）。
+    两个截法不同、名字还可能被改掉 —— 于是 `群晖科技_Synology_Drive_WP_c.deck.json`
+    该配的是 `…_chs.parsed.json`。按同名去找，文件明明在磁盘上却报
+    FileNotFoundError（实测两次），而且那句话把人往错方向指：真相是
+    「它在，只是不叫这个名字」。
+
+    `parsed` 的顺序：① 同名（deck 名 == 源名时就是它，绝大多数情况）；
+        ② sidecar 里记的路径（`run_generate` 按输出名写的那条）；
+        ③ sidecar 指的那次流程的 `run.json`（本次改动之前写的 sidecar 没有 ②，
+           但 `document.parsed_json` 记着同一个答案）。
+
+    `outline` 从 `parsed` 推得出来：`run_outline` 把两者写在**一起**，永远是同名
+    兄弟。deck 名下那份（人工确认过的）优先 —— `/api/apply` 的补丁也写在它上面。
+
+    都不中时**返回「该在的位置」而不是抛**：调用方是延迟加载（`_lazy_json`），
+    只改封面/目录的请求不该因为正文页的原文缺失而跟着失败。
+    """
+    parsed = os.path.join(PLANS, stem + '.parsed.json')
+    side: dict = {}
+    if not os.path.isfile(parsed):
+        side = _read_sidecar(parsed) or {}
+        parsed = _first_file(side.get('parsed_path'),
+                             _parsed_from_run_dir(side.get('run_dir')), parsed)
+    outline = _first_file(os.path.join(PLANS, stem + '.outline.json'),
+                          side.get('outline_path'),
+                          os.path.join(PLANS, _stem_of(parsed) + '.outline.json'))
+    return outline, parsed
 
 
 # ══════════════════════════════════════════════════════════════
